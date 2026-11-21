@@ -125,6 +125,7 @@ static Fmt fmt_map(uint32_t f) {
 #define SW(a, b, c_, d) do { r.sw = MTLTextureSwizzleChannelsMake(MTLTextureSwizzle##a, MTLTextureSwizzle##b, MTLTextureSwizzle##c_, MTLTextureSwizzle##d); r.has_sw = 1; } while (0)
     switch (f) {
     case 21: r.pf = MTLPixelFormatBGRA8Unorm; break;
+    case 20: r.pf = MTLPixelFormatBGRA8Unorm; SW(Red, Green, Blue, One); break;
     case 22: r.pf = MTLPixelFormatBGRA8Unorm; SW(Red, Green, Blue, One); break;
     case 32: r.pf = MTLPixelFormatRGBA8Unorm; break;
     case 33: r.pf = MTLPixelFormatRGBA8Unorm; SW(Red, Green, Blue, One); break;
@@ -194,7 +195,18 @@ static void upload_level(HTex *t, uint32_t surf, uint32_t face, uint32_t level) 
     int blk = d3d_fmt_block(t.fmt);
     uint32_t rows = blk ? (h + 3) / 4 : h;
     const uint8_t *bytes = d3d_surf_begin(surf);
-    if (bytes) [t.tex replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:level slice:face withBytes:bytes
+    if (bytes && t.fmt == 20 && !blk) {                               // D3DFMT_R8G8B8 (e.g. 24-bit DDS face textures): B,G,R -> B,G,R,255
+        uint8_t *px = malloc((size_t)w * 4 * (h ? h : 1));
+        if (px) {
+            for (uint32_t y = 0; y < h; y++) {
+                const uint8_t *s = bytes + (size_t)y * pitch; uint8_t *d = px + (size_t)y * w * 4;
+                for (uint32_t x = 0; x < w; x++) { d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 255; s += 3; d += 4; }
+            }
+            [t.tex replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:level slice:face withBytes:px
+                       bytesPerRow:w * 4 bytesPerImage:(size_t)w * 4 * h];
+            free(px);
+        }
+    } else if (bytes) [t.tex replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:level slice:face withBytes:bytes
                        bytesPerRow:pitch bytesPerImage:pitch * rows];
     d3d_surf_end();
 }
