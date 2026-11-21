@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import plistlib
 import shutil
 import subprocess
@@ -30,6 +31,15 @@ def digest(path):
         for block in iter(lambda: f.read(1 << 20), b''):
             h.update(block)
     return h.hexdigest()
+
+
+def host_deployment_target():
+    ver = platform.mac_ver()[0]
+    try:
+        major = int(ver.split('.')[0])
+    except (ValueError, IndexError):
+        return '14.0'
+    return f'{max(major, 14)}.0'
 
 
 def find_unicorn(explicit):
@@ -59,6 +69,7 @@ def main():
     p.add_argument('--steam-api-dylib', type=Path, help='optional Valve ARM64 libsteam_api.dylib to bundle in Frameworks/')
     p.add_argument('--steam-appid', default='22380', help='Steam AppID written to steam_appid.txt when bundling libsteam_api.dylib')
     p.add_argument('--no-call-trace', action='store_true', help='omit per-function diagnostic ring writes')
+    p.add_argument('--deployment-target', default=None, help='macOS deployment target (default: host major.0, min 14.0)')
     p.add_argument('--version', default=os.environ.get('GITHUB_RUN_NUMBER', '1'), help='positive numeric app build version')
     args = p.parse_args()
 
@@ -125,7 +136,8 @@ def main():
         macos_dir.mkdir(parents=True)
         resources_dir.mkdir(parents=True)
 
-        base = [cc, '-target', 'arm64-apple-macos14.0', '-isysroot', sdk]
+        deploy_target = args.deployment_target or host_deployment_target()
+        base = [cc, '-target', f'arm64-apple-macos{deploy_target}', '-isysroot', sdk]
 
         def compile_one(item):
             idx, source = item
@@ -215,7 +227,7 @@ def main():
             CFBundleVersion=args.version,
             CFBundleShortVersionString='0.1',
             CFBundleInfoDictionaryVersion='6.0',
-            LSMinimumSystemVersion='14.0',
+            LSMinimumSystemVersion=deploy_target,
             LSApplicationCategoryType='public.app-category.games',
             NSHighResolutionCapable=True,
             GCSupportedGameControllers=[{'ProfileName': 'ExtendedGamepad'}],
