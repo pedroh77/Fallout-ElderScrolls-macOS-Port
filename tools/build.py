@@ -159,7 +159,7 @@ def main():
             if unicorn and source.name == 'fallback.c':
                 flags += ['-I', str(unicorn / 'include')]
             if source.suffix == '.m':
-                flags.append('-fobjc-arc')
+                flags += ['-fobjc-arc', '-Wno-deprecated-declarations']
             if probe:
                 flags.append('-DFNV_PROBE')
             elif not host_check and not args.no_call_trace:
