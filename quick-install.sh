@@ -5,11 +5,12 @@
 # or Fallout 3 (GOG or Steam) into a standalone Apple Silicon macOS bundle
 # ("Fallout New Vegas.app" or "Fallout 3.app").
 #
-# Usage: quick-install.sh [--game fnv|fallout3] [--dmg] [--keep-ghidra] [--unpack-drm] [--no-steam] [--with-steam] [game_path]
+# Usage: quick-install.sh [--game fnv|fallout3] [--dmg] [--keep-cache] [--keep-ghidra] [--unpack-drm] [--no-steam] [--with-steam] [game_path]
 #   --game <id>      select game explicitly: fnv or fallout3 (default: auto-detect;
 #                    a numbered menu appears when several installations are found)
 #   --dmg            also wrap the app in "<App Name>.dmg"
-#   --keep-ghidra    keep the Ghidra project and P-code JSONL after translation
+#   --keep-cache     keep ~/Library/Caches/fnv-macos after a successful build (for faster rebuilds)
+#   --keep-ghidra    keep the Ghidra project and P-code JSONL after translation (implies --keep-cache)
 #   --unpack-drm     unattended: allow downloading Steamless + Mono to strip SteamStub DRM
 #   --no-steam       keep Steam builds in offline mode (skip Steam launcher, overlay & libsteam_api.dylib; already default for Fallout 3)
 #   --with-steam     opt into Steam launcher & Overlay for Fallout 3 Steam builds (off by default)
@@ -170,16 +171,20 @@ run_task() {
 # Options & System Checks
 # ---------------------------------------------------------------------------
 WANT_DMG=no
+KEEP_CACHE=no
+[ -n "${FNV_KEEP_CACHE:-}" ] && [ "${FNV_KEEP_CACHE}" != "0" ] && KEEP_CACHE=yes || true
 KEEP_GHIDRA=no
 UNPACK_DRM=no
 NO_STEAM=no
 WITH_STEAM=no
 GAME_ID=""
 GAME_ARG=""
+BREW_INSTALLED=()
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--dmg) WANT_DMG=yes ;;
-		--keep-ghidra) KEEP_GHIDRA=yes ;;
+		--keep-cache) KEEP_CACHE=yes ;;
+		--keep-ghidra) KEEP_GHIDRA=yes; KEEP_CACHE=yes ;;
 		--unpack-drm) UNPACK_DRM=yes ;;
 		--no-steam) NO_STEAM=yes ;;
 		--with-steam) WITH_STEAM=yes ;;
@@ -194,6 +199,15 @@ while [ $# -gt 0 ]; do
 	esac
 	shift
 done
+
+require_brew() {
+	local reason="$1"
+	if ! command -v brew >/dev/null 2>&1; then
+		die "Homebrew is required $reason." \
+			"Install Homebrew (https://brew.sh) and re-run this script:" \
+			'  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+	fi
+}
 
 case "$GAME_ID" in
 	""|fnv|fallout3) ;;
@@ -471,9 +485,9 @@ if [ "$MATCH_KIND" = gog_installer ]; then
 	GOG_INSTALLER_PATH="$ASSET_SRC"
 	ok "Found GOG installer: $GOG_INSTALLER_PATH"
 	if ! command -v innoextract >/dev/null 2>&1; then
-		command -v brew >/dev/null 2>&1 || die "Homebrew is required to install innoextract for GOG installers." \
-			"Install Homebrew from https://brew.sh and re-run this script."
+		require_brew "to install innoextract for GOG installers"
 		run_task "Installing innoextract via Homebrew" brew install innoextract
+		BREW_INSTALLED+=(innoextract)
 	fi
 	GOG_OUT="$TMP/gog-extract"
 	GOG_LOG="$TMP/innoextract.log"
@@ -536,9 +550,9 @@ PY
 
 unpack_steam_drm() {
 	if ! command -v mono >/dev/null 2>&1; then
-		command -v brew >/dev/null 2>&1 || die "Homebrew is required to install Mono for Steamless." \
-			"Install Homebrew from https://brew.sh and re-run this script."
+		require_brew "to install Mono for Steamless"
 		run_task "Installing Mono runtime via Homebrew" brew install mono
+		BREW_INSTALLED+=(mono)
 	fi
 	local mono_bin
 	mono_bin="$(command -v mono || true)"
@@ -666,10 +680,7 @@ fi
 # ---------------------------------------------------------------------------
 step "Checking Homebrew tools (ghidra, unicorn, cmake, ffmpeg)"
 
-if ! command -v brew >/dev/null 2>&1; then
-	die "Homebrew is required to install Ghidra and Unicorn." \
-		"Install from https://brew.sh and re-run this script."
-fi
+require_brew "to install build tools (ghidra, unicorn, cmake, ffmpeg)"
 
 MISSING_BREW=()
 for pkg in ghidra unicorn cmake ffmpeg; do
@@ -680,6 +691,7 @@ done
 
 if [ ${#MISSING_BREW[@]} -gt 0 ]; then
 	run_task "Installing via Homebrew: ${MISSING_BREW[*]}" brew install "${MISSING_BREW[@]}"
+	BREW_INSTALLED+=("${MISSING_BREW[@]}")
 fi
 
 HEADLESS="$(brew --prefix ghidra)/libexec/support/analyzeHeadless"
@@ -1054,20 +1066,39 @@ cleanup_source_leftovers() {
 	fi
 }
 
+cleanup_build_cache() {
+	if [ "$KEEP_CACHE" = no ]; then
+		rm -rf "$CACHE_ROOT"
+		ok "Cleaned build & translation cache ($CACHE_ROOT; pass --keep-cache to retain it)"
+	else
+		ok "Kept build & translation cache at $CACHE_ROOT (--keep-cache)"
+	fi
+}
+
+print_post_install_notes() {
+	if [ -n "$GOG_INSTALLER_PATH" ]; then
+		printf '  Original GOG installer files in %s were kept (safe to delete if you do not need a backup).\n' "$(dirname "$GOG_INSTALLER_PATH")"
+	fi
+	if [ ${#BREW_INSTALLED[@]} -gt 0 ]; then
+		printf '\n  %sHomebrew packages installed during this run:%s %s\n' "$BOLD" "$RESET" "${BREW_INSTALLED[*]}"
+		printf '  None of them are required to play. To uninstall them later:\n'
+		printf '    brew uninstall %s && brew cleanup\n' "${BREW_INSTALLED[*]}"
+	fi
+	printf '\n'
+}
+
 mkdir -p "$DEST_DIR"
 if [ "$WANT_DMG" = no ]; then
 	rm -rf "$DEST_DIR/$APP_NAME.app"
 	mv "$APP" "$DEST_DIR/$APP_NAME.app"
 	GDATA=""
 	cleanup_source_leftovers
+	cleanup_build_cache
 	ok "Placed $APP_NAME.app in $DEST_DIR"
 	printf '\n%s✔ Done!%s %s is ready.\n' "$GREEN$BOLD" "$RESET" "$DEST_DIR/$APP_NAME.app"
 	printf '  Double-click it in Applications (or Launchpad/Spotlight) to play.\n'
 	printf '  Saves & INIs live in ~/Library/Application Support/%s/\n' "$GAME_SUPPORT_DIR"
-	if [ -n "$GOG_INSTALLER_PATH" ]; then
-		printf '  Original GOG installer files in %s were kept (safe to delete if you do not need a backup).\n' "$(dirname "$GOG_INSTALLER_PATH")"
-	fi
-	printf '\n'
+	print_post_install_notes
 	open -R "$DEST_DIR/$APP_NAME.app" 2>/dev/null || true
 	exit 0
 fi
@@ -1083,8 +1114,7 @@ rm -f "$DEST_DIR/$APP_NAME.dmg"
 run_task "Compressing disk image" hdiutil convert "$TMPDMG" -format UDZO -imagekey zlib-level=9 -o "$DEST_DIR/$APP_NAME.dmg" >/dev/null
 GDATA=""
 cleanup_source_leftovers
+cleanup_build_cache
 ok "Created $DEST_DIR/$APP_NAME.dmg"
-if [ -n "$GOG_INSTALLER_PATH" ]; then
-	printf '  Original GOG installer files in %s were kept (safe to delete if you do not need a backup).\n' "$(dirname "$GOG_INSTALLER_PATH")"
-fi
+print_post_install_notes
 open -R "$DEST_DIR/$APP_NAME.dmg" 2>/dev/null || true

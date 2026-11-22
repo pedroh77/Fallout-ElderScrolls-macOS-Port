@@ -46,7 +46,7 @@ This repository adapts **[FNV-iOS-Shim](https://github.com/arjuk95-dot/FNV-iOS-S
 
 * **Build target switched from iOS (UIKit) to macOS (AppKit):**
   * Removed the `ios/` layer (touch controls, overlay editor, gyro handling, `verify_ipa.py`, and touch UI tests).
-  * Added the `macos/` layer with an AppKit window (`FNVApp.m`), **macOS Game Mode** support (`LSApplicationCategoryType: public.app-category.games`), automatic relative mouse capture while focused (released on `Cmd+Tab`), DirectInput keyboard mapping (`dinput.c` / `input.c`), and `GameController.framework` support (`FNVPad.c`).
+  * Added the `macos/` layer with an AppKit window (`FNVApp.m`), **macOS Game Mode** support (`LSApplicationCategoryType: public.app-category.games`), physical panel resolution detection (avoids rendering at inflated scaled HiDPI resolutions, with `FNV_OUTPUT_WIDTH`/`FNV_OUTPUT_HEIGHT` overrides), automatic relative mouse capture while focused (released on `Cmd+Tab`), DirectInput keyboard mapping (`dinput.c` / `input.c`), and `GameController.framework` support (`FNVPad.c`).
   * Retained `FNV-iOS-Shim` media and stability improvements: native PCM mixer (`FNVAudioMixer.c` + `AVAudioEngine`), Ogg/Vorbis decoding, DirectShow pull-source (`dshow.m`), native `AVFoundation` cutscene playback (`FNVNativeVideo.m`), and heap/texture/sync fixes.
 * **Restored Unicorn Engine fallback:**
   * `FNV-iOS-Shim` had removed Unicorn fallback execution due to iOS restrictions. This port restores `upstream/recomp/host/fallback.c` and links `libunicorn.a` to handle any uncompiled code paths or edge-case instructions.
@@ -195,13 +195,14 @@ Steam integration flags:
 ./quick-install.sh --with-steam
 ```
 
-To skip the confirmation prompt when stripping SteamStub DRM, or to wrap the app in a drag-to-Applications `.dmg`:
+To skip the confirmation prompt when stripping SteamStub DRM, wrap the app in a drag-to-Applications `.dmg`, or keep the build cache for faster incremental rebuilds during development:
 
 ```sh
 ./quick-install.sh --unpack-drm --dmg
+./quick-install.sh --keep-cache
 ```
 
-> **Note on disk usage & source cleanup:** to avoid duplicating roughly 9–10 GB per game, `quick-install.sh` **moves** the playable game files into `~/Applications/Fallout 3.app` or `~/Applications/Fallout New Vegas.app` (`Contents/Resources/GameData/`), and then **deletes the leftover Windows-only files** from the source game folder (extracted GOG folders, Steam `steamapps/common/` folders, or DepotDownloader folders). For Steam installs, it also removes the matching `appmanifest_<appid>.acf` so Steam does not keep an uninstallable ghost entry in your Mac library (Steam achievements, Overlay, playtime, and "Playing" status do not depend on the `.acf` file). Original GOG offline installers (`setup_*.exe` + `.bin`) and existing `.app` bundles are **not** deleted automatically.
+> **Note on disk usage & automatic cleanup:** to avoid duplicating roughly 9–10 GB per game, `quick-install.sh` **moves** the playable game files into `~/Applications/Fallout 3.app` or `~/Applications/Fallout New Vegas.app` (`Contents/Resources/GameData/`), **deletes leftover Windows-only files** from the source folder (extracted GOG folders, Steam `steamapps/common/` folders, or DepotDownloader folders), removes Steam's matching `appmanifest_<appid>.acf` so Steam does not keep an uninstallable ghost entry in your Mac library (Steam achievements, Overlay, playtime, and "Playing" status do not depend on the `.acf` file), and **deletes the build/translation cache (`~/Library/Caches/fnv-macos`) automatically** once the app is built and signed (pass `--keep-cache` or set `FNV_KEEP_CACHE=1` to keep it for faster rebuilds). Original GOG offline installers (`setup_*.exe` + `.bin`) and existing `.app` bundles are **not** deleted automatically.
 
 ---
 
@@ -209,18 +210,20 @@ To skip the confirmation prompt when stripping SteamStub DRM, or to wrap the app
 
 **None of the build tools are needed to play the game once the `.app` is built.** `libunicorn.a` is statically linked into the app binary, `.bik` cutscenes are already converted to `.mp4`, and Ghidra only runs during translation.
 
-`quick-install.sh` intentionally does **not** uninstall global software from your Mac. If you installed these tools only for this port and want to reclaim disk space, here is everything that may have been installed or cached and how to remove it:
+`quick-install.sh` cleans up leftover source files and `~/Library/Caches/fnv-macos` automatically upon success (unless `--keep-cache` is passed), and intentionally does **not** uninstall global software from your Mac. At the end of a run, it prints the exact list of any Homebrew packages it installed together with a ready-to-copy `brew uninstall` command.
 
-1. **Homebrew packages used for building/downloading** (edit the list to omit any tool you want to keep, e.g. `ffmpeg` or `cmake`; missing packages are skipped cleanly and Homebrew automatically removes unused dependencies like OpenJDK):
+If you installed build tools only for this port and want to remove them later:
+
+1. **Homebrew packages used for building/downloading** (or run the exact `brew uninstall ...` command printed at the end of `quick-install.sh`; edit this list to omit anything you want to keep):
    ```sh
-   for p in ghidra unicorn cmake ffmpeg mono innoextract depotdownloader steamcmd; do brew list "$p" &>/dev/null && brew uninstall "$p"; done
+   for p in ghidra unicorn cmake ffmpeg mono innoextract depotdownloader steamcmd; do brew list "$p" &>/dev/null && brew uninstall "$p"; done && brew cleanup
    ```
-   Optional: if you added the DepotDownloader tap or want to clear Homebrew's download cache:
+   Optional: if you added the DepotDownloader tap:
    ```sh
-   brew untap steamre/tools 2>/dev/null; brew cleanup
+   brew untap steamre/tools 2>/dev/null
    ```
 
-2. **Build & translation cache** (safe to delete once you have tested the `.app`; only makes a future rebuild slower):
+2. **Build & translation cache** (already removed automatically unless you passed `--keep-cache` or an earlier run stopped mid-way):
    ```sh
    rm -rf ~/Library/Caches/fnv-macos
    ```
