@@ -74,6 +74,7 @@ FLAG_BY_BIT = {b: o for o, b in flaglive.FLAG_BITS.items()}
 
 class FnEmitter:
     consumers, producers, reload = {}, {}, {}   # flag liveness (flaglive.py)
+    primary_entries = set()  # primary guest function entries from input JSONL
     entries = set()     # every guest function entry being emitted (filled by main)
     extras = {}         # function entry -> [secondary entry addresses] (FixEntries.java)
     jump_targets = set()  # addresses entered by a jump from another function (pass 1)
@@ -641,7 +642,7 @@ class FnEmitter:
         undef = "#undef SAVE_REGS\n#undef LOAD_REGS\n#undef SAVE_ALL\n#undef LOAD_ENTRY\n#undef X87_PRE\n#undef X87_POST\n#undef X87_RET\n"
         e0 = fn["entry"]
         name = f"g_{hx(e0)}"
-        extra = [x for x in self.extras.get(e0, []) if x in self.addrs and x != e0]
+        extra = [x for x in self.extras.get(e0, []) if x in self.addrs and x != e0 and x not in self.primary_entries]
         self.extra_emitted = extra
         if not extra:
             return name, (f"/* {fn['name']} */\n{macros}void {name}(CPU *c){{uint8_t *R=c->r;{decl}RT_ENTER(0x{hx(e0)}u);LOAD_ENTRY;{entry_flags}\n"
@@ -679,7 +680,8 @@ def main():
     up = args.inp + ".userops.json"
     if os.path.exists(up):
         FnEmitter.userops = json.load(open(up))
-    FnEmitter.entries = {json.loads(l)["entry"] for l in open(args.inp)}
+    FnEmitter.primary_entries = {json.loads(l)["entry"] for l in open(args.inp)}
+    FnEmitter.entries = set(FnEmitter.primary_entries)
     if args.extra:
         FnEmitter.extras = {int(k): v for k, v in json.load(open(args.extra)).items()}
     # Pass 1: a jump that leaves its function and lands *inside* another one (e.g. the code after
@@ -705,7 +707,7 @@ def main():
     added = 0
     for t in out_jumps:
         f = owner.get(t)
-        if f is not None and t != f and t not in FnEmitter.extras.get(f, []):
+        if f is not None and t != f and t not in FnEmitter.primary_entries and t not in FnEmitter.extras.get(f, []):
             FnEmitter.extras.setdefault(f, []).append(t)
             added += 1
     del owner
@@ -716,9 +718,15 @@ def main():
     print(f"flag liveness: {sum(1 for v in FnEmitter.consumers.values() if v)} consumers, "
           f"{sum(1 for v in FnEmitter.producers.values() if v)} producers, {len(FnEmitter.reload)} reload sites", file=sys.stderr)
     print(f"pass 1: {len(out_jumps)} cross-function jumps, {added} new extra entries", file=sys.stderr)
-    for v in FnEmitter.extras.values():
-        v.sort()
-        FnEmitter.entries.update(v)
+    claimed = set(FnEmitter.primary_entries)
+    for k in sorted(FnEmitter.extras):
+        dedup = []
+        for x in sorted(set(FnEmitter.extras[k])):
+            if x != k and x not in claimed:
+                claimed.add(x)
+                dedup.append(x)
+        FnEmitter.extras[k] = dedup
+        FnEmitter.entries.update(dedup)
 
     ok, skipped, why = [], [], Counter()
     tu, tu_idx, chunk = [], 0, []
