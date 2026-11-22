@@ -14,11 +14,13 @@ enum { B_SIZE = 0, B_DATA = 4, B_BPS = 8, B_FLAGS = 12, B_PLAYING = 16, B_LOOP =
        B_SPATIAL=72,B_LISTENER=76,B_GROUPS=80,B_END=84 };
 
 static uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
+static int ds_trace_voice(void) { static int on = -1; if (on < 0) on = getenv("FNV_TRACE_VOICE") != NULL; return on; }
+static uint64_t ds_trace_ms(void) { static uint64_t t0; uint64_t t = now_ns(); if (!t0) t0 = t; return (t - t0) / 1000000ull; }
 
 static uint32_t play_cursor(uint32_t b) {
     uint32_t d = COM_DATA(b), size = G32(d + B_SIZE);
     uint32_t voice=G32(d+B_VOICE);
-    if(voice){int playing,loop;uint32_t cursor=fnv_audio_voice_cursor(voice,&playing,&loop);P32(d+B_PLAYING,playing);P32(d+B_LOOP,loop);return cursor;}
+    if(voice){int was=G32(d+B_PLAYING),playing,loop;uint32_t cursor=fnv_audio_voice_cursor(voice,&playing,&loop);if(was&&!playing&&ds_trace_voice())fprintf(stderr,"[voice +%llums] ds_ended buf=%#x voice=%u size=%u\n",(unsigned long long)ds_trace_ms(),b,voice,size);P32(d+B_PLAYING,playing);P32(d+B_LOOP,loop);return cursor;}
     if (!size) return 0;
     if (!G32(d + B_PLAYING)) return G32(d + B_POS) % size;
     uint64_t t0 = ((uint64_t)G32(d + B_T0HI) << 32) | G32(d + B_T0LO);
@@ -99,15 +101,16 @@ static void Buf_Lock(CPU *c) {
     RET(c, 0, 8);
 }
 static void Buf_Play(CPU *c) {
-    uint32_t d = COM_DATA(COM_THIS(c)); uint64_t t = now_ns();
-    play_cursor(COM_THIS(c));
+    uint32_t b = COM_THIS(c), d = COM_DATA(b); uint64_t t = now_ns();
+    uint32_t cur = play_cursor(b);
     uint32_t voice=G32(d+B_VOICE);
+    if(ds_trace_voice()&&voice)fprintf(stderr,"[voice +%llums] ds_play buf=%#x voice=%u loop=%u size=%u pos=%u was=%u\n",(unsigned long long)ds_trace_ms(),b,voice,ARG(c,3)&1,G32(d+B_SIZE),cur,G32(d+B_PLAYING));
     if(voice){if(!G32(d+B_PLAYING))fnv_audio_voice_write(voice,0,MEM+G32(d+B_DATA),G32(d+B_SIZE));fnv_audio_voice_play(voice,ARG(c,3)&1);}
     if (!G32(d + B_PLAYING)) { P32(d + B_T0LO, (uint32_t)t); P32(d + B_T0HI, (uint32_t)(t >> 32)); }
     P32(d + B_PLAYING, 1); P32(d + B_LOOP, ARG(c, 3) & 1);
     RET(c, 0, 4);
 }
-static void Buf_Stop(CPU *c) { uint32_t b = COM_THIS(c), d = COM_DATA(b); P32(d + B_POS, play_cursor(b));fnv_audio_voice_stop(G32(d+B_VOICE)); P32(d + B_PLAYING, 0); RET(c, 0, 1); }
+static void Buf_Stop(CPU *c) { uint32_t b = COM_THIS(c), d = COM_DATA(b); uint32_t cur = play_cursor(b); if(ds_trace_voice()&&G32(d+B_VOICE))fprintf(stderr,"[voice +%llums] ds_stop buf=%#x voice=%u pos=%u was=%u\n",(unsigned long long)ds_trace_ms(),b,G32(d+B_VOICE),cur,G32(d+B_PLAYING)); P32(d + B_POS, cur);fnv_audio_voice_stop(G32(d+B_VOICE)); P32(d + B_PLAYING, 0); RET(c, 0, 1); }
 static void Buf_SetCurrentPosition(CPU *c) {
     uint32_t d = COM_DATA(COM_THIS(c)); uint64_t t = now_ns();
     P32(d + B_POS, ARG(c, 1)); P32(d + B_T0LO, (uint32_t)t); P32(d + B_T0HI, (uint32_t)(t >> 32));
@@ -204,7 +207,8 @@ static void DS_CreateSoundBuffer(CPU *c) {
         if(!voice){fprintf(stderr,"[audio] unsupported buffer format=%u channels=%u rate=%u bits=%u bytes=%u caller=%#x\n",format,channels,rate,bits,size,G32(REG(c,R_ESP)));gfree(G32(d+B_DATA));gfree(b);P32(ARG(c,2),0);RET(c,0x80070057u,4);return;}
         P32(d+B_VOICE,voice);P32(d+B_FREQUENCY,rate);
         if(format==1&&bits==8)memset(MEM+G32(d+B_DATA),128,size);
-        static unsigned reported;if(reported++<16)fprintf(stderr,"[audio] PCM buffer voice=%u %uch %uHz %ubit bytes=%u\n",voice,channels,rate,bits,size);
+        if(ds_trace_voice())fprintf(stderr,"[voice +%llums] ds_create buf=%#x voice=%u %uch %uHz %ubit bytes=%u flags=%#x\n",(unsigned long long)ds_trace_ms(),b,voice,channels,rate,bits,size,flags);
+        else { static unsigned reported;if(reported++<16)fprintf(stderr,"[audio] PCM buffer voice=%u %uch %uHz %ubit bytes=%u\n",voice,channels,rate,bits,size); }
     }
     P32(ARG(c, 2), b);
     RET(c, 0, 4);

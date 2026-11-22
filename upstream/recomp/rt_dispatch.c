@@ -41,8 +41,35 @@ static inline int fn_index(uint32_t a) {
     return -1;
 }
 
+#include <stdio.h>
+#include <time.h>
+static int rt_trace_voice(void) { static int on = -1; if (on < 0) on = getenv("FNV_TRACE_VOICE") != NULL; return on; }
+static uint64_t rt_trace_ms(void) { static uint64_t t0; uint64_t t = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); if (!t0) t0 = t; return (t - t0) / 1000000ull; }
+
 void rt_call(CPU *c, uint32_t a) {
     if (a >= 0xFEE00000u && a < 0xFEE10000u) { rt_import_call(c, a); return; }
+    if (__builtin_expect(a == 0x7664d0u || a == 0x766430u || a == 0x7664a0u || a == 0x766510u || a == 0x767660u, 0) && rt_trace_voice()) {
+        uint32_t esp = (uint32_t)LD(c->r + 16, 4);
+        if (a == 0x767660u) {
+            uint32_t actor = (uint32_t)LD(c->r + 4, 4);
+            uint32_t fid = actor ? (uint32_t)LDM(actor + 0xc, 4) : 0;
+            if (fid == 0x290a7u || fid == 0x5ede0u) {
+                uint8_t b7b = MEM[actor + 0x7b], b7c = MEM[actor + 0x7c], b7d = MEM[actor + 0x7d];
+                static uint32_t last_dad = 0xffffffffu, last_mom = 0xffffffffu;
+                uint32_t *lp = (fid == 0x290a7u) ? &last_dad : &last_mom;
+                uint32_t cur = ((uint32_t)b7b << 16) | ((uint32_t)b7c << 8) | b7d;
+                if (*lp != cur) {
+                    *lp = cur;
+                    fprintf(stderr, "[voice-cb +%llums] UpdateDialogue fid=%#x actor=%#x 7b=%u 7c=%#x 7d=%u\n",
+                            (unsigned long long)rt_trace_ms(), fid, actor, b7b, b7c, b7d);
+                }
+            }
+        } else {
+            uint32_t ra = (uint32_t)LDM(esp, 4), arg0 = (uint32_t)LDM(esp + 4, 4), arg1 = (uint32_t)LDM(esp + 8, 4);
+            fprintf(stderr, "[voice-cb +%llums] call %#x ra=%#x arg0=%#x arg1=%#x\n",
+                    (unsigned long long)rt_trace_ms(), a, ra, arg0, arg1);
+        }
+    }
     int i = fn_index(a);
     if (i >= 0) { rt_fn_ptr[i](c); return; }
     rt_fallback(c, a);

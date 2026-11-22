@@ -5,11 +5,14 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 #include "shims.h"
 extern int host_run_guest(CPU *,uint32_t);
+static int trace_voice(void){static int on=-1;if(on<0)on=getenv("FNV_TRACE_VOICE")!=NULL;return on;}
+static uint64_t trace_ms(void){static uint64_t t0;uint64_t t=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);if(!t0)t0=t;return (t-t0)/1000000ull;}
 typedef struct VorbisContext {
     uint32_t key,datasource,callbacks[4],scratch,scratch_size,info;
-    CPU *cpu;int callback_failed;OggVorbis_File native;
+    CPU *cpu;int callback_failed,eof_logged;uint64_t bytes_read;OggVorbis_File native;
     struct VorbisContext *next;
 } VorbisContext;
 static VorbisContext *contexts;
@@ -48,7 +51,9 @@ void ov_open_callbacks_(CPU *c){
             else{
                 result=ov_open_callbacks(v,&v->native,bytes?(const char*)MEM+initial:NULL,bytes,cb);
                 if(v->callback_failed&&result==0){ov_clear(&v->native);result=OV_EREAD;}
-                if(result==0){v->next=contexts;contexts=v;vorbis_info *info=ov_info(&v->native,-1);fprintf(stderr,"[vorbis] opened guest=%#x channels=%d rate=%ld seekable=%ld\n",key,info?info->channels:0,info?info->rate:0,ov_seekable(&v->native));}
+                if(result==0){v->next=contexts;contexts=v;vorbis_info *info=ov_info(&v->native,-1);
+                    if(trace_voice())fprintf(stderr,"[voice +%llums] ov_open guest=%#x ch=%d rate=%ld pcm_total=%lld\n",(unsigned long long)trace_ms(),key,info?info->channels:0,info?info->rate:0,(long long)ov_pcm_total(&v->native,-1));
+                    else fprintf(stderr,"[vorbis] opened guest=%#x channels=%d rate=%ld seekable=%ld\n",key,info?info->channels:0,info?info->rate:0,ov_seekable(&v->native));}
                 else release(v);
             }
         }else result=OV_EFAULT;
@@ -59,7 +64,9 @@ void ov_open_callbacks_(CPU *c){
 void ov_clear_(CPU *c){
     pthread_mutex_lock(&vorbis_lock);uint32_t key=ARG(c,0);VorbisContext **link=&contexts;
     while(*link&&(*link)->key!=key)link=&(*link)->next;
-    int result=OV_EINVAL;if(*link){VorbisContext *v=*link;*link=v->next;v->cpu=c;result=ov_clear(&v->native);release(v);}
+    int result=OV_EINVAL;if(*link){VorbisContext *v=*link;*link=v->next;v->cpu=c;
+        if(trace_voice())fprintf(stderr,"[voice +%llums] ov_clear guest=%#x bytes_read=%llu\n",(unsigned long long)trace_ms(),key,(unsigned long long)v->bytes_read);
+        result=ov_clear(&v->native);release(v);}
     pthread_mutex_unlock(&vorbis_lock);RET(c,(uint32_t)result,0);
 }
 void ov_info_(CPU *c){
@@ -75,7 +82,9 @@ void ov_pcm_total_(CPU *c){
 void ov_seekable_(CPU *c){pthread_mutex_lock(&vorbis_lock);VorbisContext *v=find(ARG(c,0));uint32_t result=v?(uint32_t)ov_seekable(&v->native):0;pthread_mutex_unlock(&vorbis_lock);RET(c,result,0);}
 void ov_read_(CPU *c){
     pthread_mutex_lock(&vorbis_lock);VorbisContext *v=find(ARG(c,0));uint32_t buffer=ARG(c,1),length=ARG(c,2),out=ARG(c,6);long result=OV_EINVAL;int stream=0;
-    if(v&&length<=16u*1024*1024&&buffer<=0xffffffffu-length){v->cpu=c;result=ov_read(&v->native,(char*)MEM+buffer,(int)length,(int)ARG(c,3),(int)ARG(c,4),(int)ARG(c,5),&stream);if(v->callback_failed)result=OV_EREAD;if(out)P32(out,(uint32_t)stream);}
+    if(v&&length<=16u*1024*1024&&buffer<=0xffffffffu-length){v->cpu=c;result=ov_read(&v->native,(char*)MEM+buffer,(int)length,(int)ARG(c,3),(int)ARG(c,4),(int)ARG(c,5),&stream);if(v->callback_failed)result=OV_EREAD;if(out)P32(out,(uint32_t)stream);
+        if(result>0)v->bytes_read+=(uint64_t)result;
+        else if(trace_voice()&&!v->eof_logged){v->eof_logged=1;fprintf(stderr,"[voice +%llums] ov_read eof/err=%ld guest=%#x bytes_read=%llu\n",(unsigned long long)trace_ms(),result,v->key,(unsigned long long)v->bytes_read);}}
     pthread_mutex_unlock(&vorbis_lock);RET(c,(uint32_t)result,0);
 }
 #endif
