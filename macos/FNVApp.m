@@ -504,6 +504,53 @@ static NSString *exeHash(NSURL *url) {
             [lines insertObject:[NSString stringWithFormat:@"%@=%@", value[0], value[1]] atIndex:(NSUInteger)insert++];
         }
     }
+    // Without Fallout3Launcher.exe, Fallout3.exe initializes missing INIPrefSetting LOD
+    // multipliers to 0.0000. Dividing by fLODFadeOutMultActors=0 produces +inf in the
+    // actor fade check (0xad2960), culling every NPC and starving Actor::Update/dialogue.
+    NSDictionary *lodDefaults = @{
+        @"flodfadeoutmultobjects": @[@"fLODFadeOutMultObjects", @"5.0000"],
+        @"flodfadeoutmultitems":   @[@"fLODFadeOutMultItems",   @"3.0000"],
+        @"flodfadeoutmultactors":  @[@"fLODFadeOutMultActors",  @"6.0000"],
+    };
+    {
+        NSMutableSet *pending = [NSMutableSet setWithArray:lodDefaults.allKeys];
+        BOOL inside = NO;
+        NSInteger insert = -1;
+        for (NSUInteger i = 0; i < lines.count; i++) {
+            NSString *line = [lines[i] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+            if ([line hasPrefix:@"["] && [line hasSuffix:@"]"]) {
+                if (inside && insert < 0) insert = (NSInteger)i;
+                inside = [[[line substringWithRange:NSMakeRange(1, line.length - 2)] lowercaseString] isEqualToString:@"lod"];
+            } else if (inside) {
+                NSRange equal = [line rangeOfString:@"="];
+                if (equal.location != NSNotFound) {
+                    NSString *key = [[[line substringToIndex:equal.location] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet] lowercaseString];
+                    NSArray *def = lodDefaults[key];
+                    if (def) {
+                        double curVal = [[[line substringFromIndex:equal.location + 1] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet] doubleValue];
+                        if (!(curVal > 0.0)) {
+                            lines[i] = [NSString stringWithFormat:@"%@=%@", def[0], def[1]];
+                        }
+                        [pending removeObject:key];
+                    }
+                }
+            }
+        }
+        if (pending.count > 0) {
+            if (insert < 0) {
+                insert = (NSInteger)lines.count;
+                if (!inside) {
+                    [lines addObject:@"[LOD]"];
+                    insert++;
+                }
+            }
+            for (NSString *key in pending) {
+                NSArray *def = lodDefaults[key];
+                [lines insertObject:[NSString stringWithFormat:@"%@=%@", def[0], def[1]] atIndex:(NSUInteger)insert++];
+            }
+        }
+    }
+
     [fm createDirectoryAtPath:prefs.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:NULL];
     NSError *prefsError = nil;
     BOOL prefsOK = [[lines componentsJoinedByString:@"\n"] writeToFile:prefs atomically:YES encoding:NSISOLatin1StringEncoding error:&prefsError];
