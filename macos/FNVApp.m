@@ -1,9 +1,11 @@
 #import <AppKit/AppKit.h>
+#import <CoreGraphics/CoreGraphics.h>
 #import <GameController/GameController.h>
 #import <CommonCrypto/CommonDigest.h>
 #import "FNVSurface.h"
 #import "FNVPad.h"
 #include "FNVDisplay.h"
+#include <IOKit/graphics/IOGraphicsTypes.h>
 #ifndef FNV_PROBE
 #include "FNVNativeMedia.h"
 #endif
@@ -32,15 +34,37 @@
 #define GAME_EXE_C "FalloutNV.exe"
 #endif
 
+static CAMetalLayer *screenLayer;
+static CGSize lockedDrawableSize;
+
 @interface FNVMetalView : NSView
 @end
 @implementation FNVMetalView
 - (CALayer *)makeBackingLayer { return [CAMetalLayer layer]; }
 - (BOOL)wantsUpdateLayer { return YES; }
 - (BOOL)acceptsFirstResponder { return YES; }
+- (void)applyLockedDrawableSize {
+    if (lockedDrawableSize.width > 0 && lockedDrawableSize.height > 0 &&
+        [self.layer isKindOfClass:[CAMetalLayer class]]) {
+        CAMetalLayer *ml = (CAMetalLayer *)self.layer;
+        if (!CGSizeEqualToSize(ml.drawableSize, lockedDrawableSize)) {
+            ml.drawableSize = lockedDrawableSize;
+        }
+    }
+}
+- (void)layout {
+    [super layout];
+    [self applyLockedDrawableSize];
+}
+- (void)setFrameSize:(NSSize)newSize {
+    [super setFrameSize:newSize];
+    [self applyLockedDrawableSize];
+}
+- (void)viewDidChangeBackingProperties {
+    [super viewDidChangeBackingProperties];
+    [self applyLockedDrawableSize];
+}
 @end
-
-static CAMetalLayer *screenLayer;
 static NSWindow *mainWindow;
 static pthread_mutex_t activeLock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t activeChanged = PTHREAD_COND_INITIALIZER;
@@ -66,6 +90,7 @@ static void onMain(dispatch_block_t work) {
 
 CAMetalLayer *fnv_surface(id<MTLDevice> device, CGSize size) {
     onMain(^{
+        lockedDrawableSize = size;
         screenLayer.device = device;
         screenLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
         screenLayer.framebufferOnly = NO;
@@ -80,8 +105,96 @@ CAMetalLayer *fnv_surface(id<MTLDevice> device, CGSize size) {
 
 void fnv_resize_surface(CGSize size) {
     onMain(^{
+        lockedDrawableSize = size;
         screenLayer.drawableSize = size;
     });
+}
+
+// Query the physical panel pixel dimensions for the target NSScreen even when
+// macOS uses a scaled HiDPI backing buffer (e.g. 1440x900@2x = 2880x1800 on
+// a 2560x1600 physical Retina panel). Supports FNV_OUTPUT_WIDTH/HEIGHT.
+static void detectPhysicalDisplayPixels(NSScreen *screen,
+                                        unsigned *outPanelW, unsigned *outPanelH,
+                                        unsigned *outBackingW, unsigned *outBackingH) {
+    CGFloat scale = screen ? screen.backingScaleFactor : 2.0;
+    NSRect screenFrame = screen ? screen.frame : NSMakeRect(0, 0, 1280, 720);
+    unsigned backW = (unsigned)llround(screenFrame.size.width * scale);
+    unsigned backH = (unsigned)llround(screenFrame.size.height * scale);
+    if (backW < 640) backW = 1280;
+    if (backH < 480) backH = 720;
+
+    unsigned panelW = backW;
+    unsigned panelH = backH;
+
+    if (screen) {
+        NSNumber *num = screen.deviceDescription[@"NSScreenNumber"];
+        CGDirectDisplayID did = num ? (CGDirectDisplayID)num.unsignedIntValue : CGMainDisplayID();
+        double curAspect = 0.0;
+        CGDisplayModeRef curMode = CGDisplayCopyDisplayMode(did);
+        if (curMode) {
+            size_t cw = CGDisplayModeGetPixelWidth(curMode);
+            size_t ch = CGDisplayModeGetPixelHeight(curMode);
+            if (cw >= 640 && ch >= 480) curAspect = (double)cw / (double)ch;
+            CGDisplayModeRelease(curMode);
+        }
+
+        NSDictionary *opts = @{(__bridge NSString *)kCGDisplayShowDuplicateLowResolutionModes: @YES};
+        CFArrayRef modes = CGDisplayCopyAllDisplayModes(did, (__bridge CFDictionaryRef)opts);
+        if (modes) {
+            uint64_t bestAspectPixels = 0;
+            unsigned bestAspectW = 0, bestAspectH = 0;
+            uint64_t bestAnyPixels = 0;
+            unsigned bestAnyW = 0, bestAnyH = 0;
+
+            CFIndex count = CFArrayGetCount(modes);
+            for (CFIndex i = 0; i < count; i++) {
+                CGDisplayModeRef m = (CGDisplayModeRef)CFArrayGetValueAtIndex(modes, i);
+                if (!m || !(CGDisplayModeGetIOFlags(m) & kDisplayModeNativeFlag)) continue;
+                size_t pw = CGDisplayModeGetPixelWidth(m);
+                size_t ph = CGDisplayModeGetPixelHeight(m);
+                if (pw < 640 || ph < 480 || pw > 16384 || ph > 16384) continue;
+                uint64_t pixels = (uint64_t)pw * (uint64_t)ph;
+                if (pixels > bestAnyPixels) {
+                    bestAnyPixels = pixels;
+                    bestAnyW = (unsigned)pw;
+                    bestAnyH = (unsigned)ph;
+                }
+                if (curAspect > 0.0) {
+                    double ma = (double)pw / (double)ph;
+                    if (fabs(ma - curAspect) <= 0.05 && pixels > bestAspectPixels) {
+                        bestAspectPixels = pixels;
+                        bestAspectW = (unsigned)pw;
+                        bestAspectH = (unsigned)ph;
+                    }
+                }
+            }
+            CFRelease(modes);
+
+            if (bestAspectW > 0 && bestAspectH > 0) {
+                panelW = bestAspectW;
+                panelH = bestAspectH;
+            } else if (bestAnyW > 0 && bestAnyH > 0) {
+                panelW = bestAnyW;
+                panelH = bestAnyH;
+            }
+        }
+    }
+
+    const char *envW = getenv("FNV_OUTPUT_WIDTH");
+    const char *envH = getenv("FNV_OUTPUT_HEIGHT");
+    if (envW && envH) {
+        unsigned ow = (unsigned)strtoul(envW, NULL, 10);
+        unsigned oh = (unsigned)strtoul(envH, NULL, 10);
+        if (ow >= 640 && ow <= 16384 && oh >= 480 && oh <= 16384) {
+            panelW = ow;
+            panelH = oh;
+        }
+    }
+
+    if (outPanelW) *outPanelW = panelW;
+    if (outPanelH) *outPanelH = panelH;
+    if (outBackingW) *outBackingW = backW;
+    if (outBackingH) *outBackingH = backH;
 }
 
 // macOS virtual key code -> DirectInput scancode (DIK_*)
@@ -281,9 +394,8 @@ static NSString *exeHash(NSURL *url) {
 
     NSScreen *screen = NSScreen.mainScreen ?: NSScreen.screens.firstObject;
     CGFloat scale = screen ? screen.backingScaleFactor : 2.0;
-    NSRect screenFrame = screen ? screen.frame : NSMakeRect(0, 0, 1280, 720);
-    unsigned nativeW = (unsigned)llround(screenFrame.size.width * scale);
-    unsigned nativeH = (unsigned)llround(screenFrame.size.height * scale);
+    unsigned nativeW = 0, nativeH = 0, backingW = 0, backingH = 0;
+    detectPhysicalDisplayPixels(screen, &nativeW, &nativeH, &backingW, &backingH);
     fnv_display_configure(nativeW, nativeH);
 
     NSRect vis = screen ? screen.visibleFrame : NSMakeRect(0, 0, 1280, 720);
@@ -381,6 +493,10 @@ static NSString *exeHash(NSURL *url) {
     NSString *revision = [NSBundle.mainBundle objectForInfoDictionaryKey:@"FNVBuildSourceCommit"] ?: @"unknown";
     NSString *buildVersion = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"unknown";
     fprintf(stderr, "[build] source=%s version=%s\n", revision.UTF8String, buildVersion.UTF8String);
+    if (backingW != nativeW || backingH != nativeH) {
+        fprintf(stderr, "[display] physical panel %ux%u (desktop backing %ux%u)\n",
+                nativeW, nativeH, backingW, backingH);
+    }
 
 #ifdef FNV_PROBE
     [self showStatus:@"Input / Metal Probe — Move mouse for R/G, W/S or controller for Blue. Cmd+Q to quit."];
