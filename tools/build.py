@@ -215,6 +215,7 @@ def main():
 
         # a dedicated Fallout 3 identifier: macOS keys its per-app icon caches by bundle id,
         # and the old shared dev.f3mac.game identity kept serving a stale Game Mode icon
+        # full behavior + Oblivion/port checklist: docs/GAME-MODE-ICONS.md
         bundle_id = ('dev.f3mac.fallout3' if args.game == 'fallout3'
                      else 'dev.fnvmac.' + args.target)
         info = dict(
