@@ -187,7 +187,7 @@ def main():
             return
 
         frameworks = [
-            'Foundation', 'AppKit', 'Metal', 'QuartzCore', 'CoreGraphics',
+            'Foundation', 'AppKit', 'Metal', 'MetalFX', 'QuartzCore', 'CoreGraphics',
             'AVFoundation', 'CoreVideo', 'CoreMedia', 'ImageIO',
             'UniformTypeIdentifiers', 'GameController',
         ]

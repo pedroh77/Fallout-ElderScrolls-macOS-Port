@@ -39,6 +39,12 @@
 static CAMetalLayer *screenLayer;
 static CGSize lockedDrawableSize;
 
+extern void fnv_display_configure_scaled(unsigned out_w, unsigned out_h, unsigned scale_pct);
+extern unsigned fnv_output_width(void);
+extern unsigned fnv_output_height(void);
+extern void fnv_display_set_refresh(int hz);
+extern void fnv_graphics_configure(int upscaler, int aa);
+
 @interface FNVMetalView : NSView
 @end
 @implementation FNVMetalView
@@ -224,6 +230,9 @@ static NSString *prefKey(NSString *suffix) {
 
 typedef struct {
     int preset;          // 0=Keep FalloutPrefs.ini, 1=Low, 2=Medium, 3=High, 4=Ultra
+    unsigned renderScale;// 50..100 (default 100 = Native)
+    int upscaler;        // 0=Bilinear, 1=MetalFX Spatial
+    int antiAliasing;    // 0=Off, 1=SMAA, 2=FXAA
     int textureSize;     // 0=Large (skip 0), 1=Medium (skip 1), 2=Small (skip 2)
     int anisotropy;      // 0, 2, 4, 8, 15
     int shadowQuality;   // 0=Off, 1=Medium (256), 2=High (512), 3=Ultra (1024)
@@ -264,6 +273,16 @@ static FalloutOptions loadOptions(void) {
     if (opts.preset < 0 || opts.preset > 4) opts.preset = 4;
     applyPresetDefaults(&opts, opts.preset > 0 ? opts.preset : 4);
 
+    id rsObj = [ud objectForKey:prefKey(@"RenderScale")];
+    opts.renderScale = rsObj ? (unsigned)[rsObj integerValue] : 100u;
+    if (opts.renderScale < 50u || opts.renderScale > 100u) opts.renderScale = 100u;
+    id upObj = [ud objectForKey:prefKey(@"Upscaler")];
+    opts.upscaler = upObj ? (int)[upObj integerValue] : 1;
+    if (opts.upscaler < 0 || opts.upscaler > 1) opts.upscaler = 1;
+    id aaObj = [ud objectForKey:prefKey(@"AntiAliasing")];
+    opts.antiAliasing = aaObj ? (int)[aaObj integerValue] : 0;
+    if (opts.antiAliasing < 0 || opts.antiAliasing > 2) opts.antiAliasing = 0;
+
     id tObj = [ud objectForKey:prefKey(@"TextureSize")];
     if (tObj) { opts.textureSize = (int)[tObj integerValue]; if (opts.textureSize < 0 || opts.textureSize > 2) opts.textureSize = 0; }
     id aObj = [ud objectForKey:prefKey(@"Anisotropy")];
@@ -289,6 +308,22 @@ static FalloutOptions loadOptions(void) {
         else if (!strcasecmp(envPreset, "high") || !strcmp(envPreset, "3")) { opts.preset = 3; applyPresetDefaults(&opts, 3); }
         else if (!strcasecmp(envPreset, "ultra") || !strcmp(envPreset, "4")) { opts.preset = 4; applyPresetDefaults(&opts, 4); }
     }
+    const char *envScale = getenv("FNV_RENDER_SCALE");
+    if (envScale && envScale[0]) {
+        unsigned v = (unsigned)strtoul(envScale, NULL, 10);
+        if (v >= 50u && v <= 100u) opts.renderScale = v;
+    }
+    const char *envUp = getenv("FNV_UPSCALER");
+    if (envUp && envUp[0]) {
+        if (!strcasecmp(envUp, "bilinear") || !strcmp(envUp, "0")) opts.upscaler = 0;
+        else if (!strcasecmp(envUp, "metalfx") || !strcmp(envUp, "1")) opts.upscaler = 1;
+    }
+    const char *envAA = getenv("FNV_AA");
+    if (envAA && envAA[0]) {
+        if (!strcasecmp(envAA, "off") || !strcasecmp(envAA, "none") || !strcmp(envAA, "0")) opts.antiAliasing = 0;
+        else if (!strcasecmp(envAA, "smaa") || !strcmp(envAA, "1")) opts.antiAliasing = 1;
+        else if (!strcasecmp(envAA, "fxaa") || !strcmp(envAA, "2")) opts.antiAliasing = 2;
+    }
     const char *envMA = getenv("FNV_MOUSE_ACCEL");
     if (envMA && envMA[0]) opts.disableMouseAccel = (atoi(envMA) == 0);
     if (getenv("FNV_WINDOWED")) opts.fullscreen = NO;
@@ -298,6 +333,9 @@ static FalloutOptions loadOptions(void) {
 static void saveOptions(FalloutOptions opts) {
     NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
     [ud setInteger:opts.preset forKey:prefKey(@"QualityPreset")];
+    [ud setInteger:(NSInteger)opts.renderScale forKey:prefKey(@"RenderScale")];
+    [ud setInteger:opts.upscaler forKey:prefKey(@"Upscaler")];
+    [ud setInteger:opts.antiAliasing forKey:prefKey(@"AntiAliasing")];
     [ud setInteger:opts.textureSize forKey:prefKey(@"TextureSize")];
     [ud setInteger:opts.anisotropy forKey:prefKey(@"Anisotropy")];
     [ud setInteger:opts.shadowQuality forKey:prefKey(@"ShadowQuality")];
@@ -377,6 +415,10 @@ static NSString *exeHash(NSURL *url) {
 #ifndef FNV_PROBE
 @property (nonatomic, strong) NSWindow *optionsWindow;
 @property (nonatomic, strong) NSPopUpButton *presetPopup;
+@property (nonatomic, strong) NSPopUpButton *scalePopup;
+@property (nonatomic, strong) NSPopUpButton *upscalerPopup;
+@property (nonatomic, strong) NSPopUpButton *aaPopup;
+@property (nonatomic, strong) NSTextField *resPreviewLabel;
 @property (nonatomic, strong) NSPopUpButton *texturePopup;
 @property (nonatomic, strong) NSPopUpButton *anisoPopup;
 @property (nonatomic, strong) NSPopUpButton *shadowPopup;
@@ -580,6 +622,32 @@ static NSString *exeHash(NSURL *url) {
     [self updateDetailControlsEnabled];
 }
 
+- (void)updateResolutionPreview {
+    unsigned pct = (unsigned)self.scalePopup.selectedItem.tag;
+    if (pct < 50u) pct = 50u;
+    if (pct > 100u) pct = 100u;
+    unsigned rw = self.nativeW, rh = self.nativeH;
+    if (pct < 100u) {
+        rw = ((self.nativeW * pct / 100u) + 1u) & ~1u;
+        rh = ((self.nativeH * pct / 100u) + 1u) & ~1u;
+        if (rw < 640u) rw = 640u;
+        if (rh < 480u) rh = 480u;
+    }
+    BOOL scaled = (rw != self.nativeW || rh != self.nativeH);
+    self.upscalerPopup.enabled = scaled;
+    if (scaled) {
+        NSString *up = (self.upscalerPopup.selectedItem.tag == 1) ? @"MetalFX" : @"Bilinear";
+        self.resPreviewLabel.stringValue = [NSString stringWithFormat:@"Render: %ux%u → %ux%u (%@)",
+                                            rw, rh, self.nativeW, self.nativeH, up];
+    } else {
+        self.resPreviewLabel.stringValue = [NSString stringWithFormat:@"Render: %ux%u (Native)",
+                                            self.nativeW, self.nativeH];
+    }
+}
+
+- (void)scaleChanged:(id)sender { (void)sender; [self updateResolutionPreview]; }
+- (void)upscalerChanged:(id)sender { (void)sender; [self updateResolutionPreview]; }
+
 - (void)quitClicked:(id)sender {
     (void)sender;
     [NSApp terminate:nil];
@@ -589,6 +657,9 @@ static NSString *exeHash(NSURL *url) {
     (void)sender;
     FalloutOptions opts;
     opts.preset = (int)self.presetPopup.selectedItem.tag;
+    opts.renderScale = (unsigned)self.scalePopup.selectedItem.tag;
+    opts.upscaler = (int)self.upscalerPopup.selectedItem.tag;
+    opts.antiAliasing = (int)self.aaPopup.selectedItem.tag;
     opts.textureSize = (int)self.texturePopup.selectedItem.tag;
     opts.anisotropy = (int)self.anisoPopup.selectedItem.tag;
     opts.shadowQuality = (int)self.shadowPopup.selectedItem.tag;
@@ -598,6 +669,22 @@ static NSString *exeHash(NSURL *url) {
     opts.disableMouseAccel = (self.mouseAccelCheck.state == NSControlStateValueOn);
     opts.skipLauncher = (self.skipLauncherCheck.state == NSControlStateValueOn);
     saveOptions(opts);
+    const char *envScale = getenv("FNV_RENDER_SCALE");
+    if (envScale && envScale[0]) {
+        unsigned v = (unsigned)strtoul(envScale, NULL, 10);
+        if (v >= 50u && v <= 100u) opts.renderScale = v;
+    }
+    const char *envUp = getenv("FNV_UPSCALER");
+    if (envUp && envUp[0]) {
+        if (!strcasecmp(envUp, "bilinear") || !strcmp(envUp, "0")) opts.upscaler = 0;
+        else if (!strcasecmp(envUp, "metalfx") || !strcmp(envUp, "1")) opts.upscaler = 1;
+    }
+    const char *envAA = getenv("FNV_AA");
+    if (envAA && envAA[0]) {
+        if (!strcasecmp(envAA, "off") || !strcasecmp(envAA, "none") || !strcmp(envAA, "0")) opts.antiAliasing = 0;
+        else if (!strcasecmp(envAA, "smaa") || !strcmp(envAA, "1")) opts.antiAliasing = 1;
+        else if (!strcasecmp(envAA, "fxaa") || !strcmp(envAA, "2")) opts.antiAliasing = 2;
+    }
     if (getenv("FNV_WINDOWED")) opts.fullscreen = NO;
     const char *envMA = getenv("FNV_MOUSE_ACCEL");
     if (envMA && envMA[0]) opts.disableMouseAccel = (atoi(envMA) == 0);
@@ -605,7 +692,7 @@ static NSString *exeHash(NSURL *url) {
 }
 
 - (void)showOptionsWindow:(FalloutOptions)opts {
-    NSRect rect = NSMakeRect(0, 0, 480, 462);
+    NSRect rect = NSMakeRect(0, 0, 480, 586);
     self.optionsWindow = [[NSWindow alloc] initWithContentRect:rect
                                                      styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
                                                        backing:NSBackingStoreBuffered
@@ -617,21 +704,21 @@ static NSString *exeHash(NSURL *url) {
 
     NSTextField *title = [NSTextField labelWithString:@"Graphics & Input Options"];
     title.font = [NSFont boldSystemFontOfSize:15];
-    title.frame = NSMakeRect(24, 426, 432, 22);
+    title.frame = NSMakeRect(24, 550, 432, 22);
     [cv addSubview:title];
 
     NSString *dispStr = (self.backingW != self.nativeW || self.backingH != self.nativeH)
-        ? [NSString stringWithFormat:@"Display: %ux%u panel (desktop %ux%u) @ %d Hz  ·  MSAA Off",
+        ? [NSString stringWithFormat:@"Display: %ux%u panel (desktop %ux%u) @ %d Hz",
            self.nativeW, self.nativeH, self.backingW, self.backingH, self.refreshHz]
-        : [NSString stringWithFormat:@"Display: %ux%u @ %d Hz  ·  MSAA Off",
+        : [NSString stringWithFormat:@"Display: %ux%u @ %d Hz",
            self.nativeW, self.nativeH, self.refreshHz];
     NSTextField *sub = [NSTextField labelWithString:dispStr];
     sub.font = [NSFont systemFontOfSize:12];
     sub.textColor = NSColor.secondaryLabelColor;
-    sub.frame = NSMakeRect(24, 406, 432, 16);
+    sub.frame = NSMakeRect(24, 530, 432, 16);
     [cv addSubview:sub];
 
-    NSBox *sep1 = [[NSBox alloc] initWithFrame:NSMakeRect(24, 394, 432, 1)];
+    NSBox *sep1 = [[NSBox alloc] initWithFrame:NSMakeRect(24, 518, 432, 1)];
     sep1.boxType = NSBoxSeparator;
     [cv addSubview:sep1];
 
@@ -648,8 +735,8 @@ static NSString *exeHash(NSURL *url) {
         return p;
     };
 
-    mkLabel(@"Quality Preset:", 356);
-    self.presetPopup = mkPopup(354);
+    mkLabel(@"Quality Preset:", 480);
+    self.presetPopup = mkPopup(478);
     [self.presetPopup addItemWithTitle:@"Ultra (Recommended)"]; self.presetPopup.lastItem.tag = 4;
     [self.presetPopup addItemWithTitle:@"High"]; self.presetPopup.lastItem.tag = 3;
     [self.presetPopup addItemWithTitle:@"Medium"]; self.presetPopup.lastItem.tag = 2;
@@ -659,15 +746,47 @@ static NSString *exeHash(NSURL *url) {
     self.presetPopup.target = self;
     self.presetPopup.action = @selector(presetChanged:);
 
-    mkLabel(@"Texture Size:", 322);
-    self.texturePopup = mkPopup(320);
+    mkLabel(@"Render Scale:", 446);
+    self.scalePopup = mkPopup(444);
+    [self.scalePopup addItemWithTitle:@"100% (Native)"]; self.scalePopup.lastItem.tag = 100;
+    [self.scalePopup addItemWithTitle:@"85% (Ultra Quality)"]; self.scalePopup.lastItem.tag = 85;
+    [self.scalePopup addItemWithTitle:@"75% (Quality)"]; self.scalePopup.lastItem.tag = 75;
+    [self.scalePopup addItemWithTitle:@"67% (Balanced)"]; self.scalePopup.lastItem.tag = 67;
+    [self.scalePopup addItemWithTitle:@"50% (Performance)"]; self.scalePopup.lastItem.tag = 50;
+    if (![self.scalePopup selectItemWithTag:(NSInteger)opts.renderScale]) [self.scalePopup selectItemWithTag:100];
+    self.scalePopup.target = self;
+    self.scalePopup.action = @selector(scaleChanged:);
+
+    self.resPreviewLabel = [NSTextField labelWithString:@""];
+    self.resPreviewLabel.font = [NSFont systemFontOfSize:11];
+    self.resPreviewLabel.textColor = NSColor.secondaryLabelColor;
+    self.resPreviewLabel.frame = NSMakeRect(198, 424, 258, 15);
+    [cv addSubview:self.resPreviewLabel];
+
+    mkLabel(@"Upscaler:", 392);
+    self.upscalerPopup = mkPopup(390);
+    [self.upscalerPopup addItemWithTitle:@"MetalFX Spatial"]; self.upscalerPopup.lastItem.tag = 1;
+    [self.upscalerPopup addItemWithTitle:@"Bilinear"]; self.upscalerPopup.lastItem.tag = 0;
+    [self.upscalerPopup selectItemWithTag:opts.upscaler];
+    self.upscalerPopup.target = self;
+    self.upscalerPopup.action = @selector(upscalerChanged:);
+
+    mkLabel(@"Anti-Aliasing:", 358);
+    self.aaPopup = mkPopup(356);
+    [self.aaPopup addItemWithTitle:@"Off"]; self.aaPopup.lastItem.tag = 0;
+    [self.aaPopup addItemWithTitle:@"SMAA 1x (Post-Process)"]; self.aaPopup.lastItem.tag = 1;
+    [self.aaPopup addItemWithTitle:@"FXAA (Post-Process)"]; self.aaPopup.lastItem.tag = 2;
+    [self.aaPopup selectItemWithTag:opts.antiAliasing];
+
+    mkLabel(@"Texture Size:", 324);
+    self.texturePopup = mkPopup(322);
     [self.texturePopup addItemWithTitle:@"Large (High)"]; self.texturePopup.lastItem.tag = 0;
     [self.texturePopup addItemWithTitle:@"Medium"]; self.texturePopup.lastItem.tag = 1;
     [self.texturePopup addItemWithTitle:@"Small (Low)"]; self.texturePopup.lastItem.tag = 2;
     [self.texturePopup selectItemWithTag:opts.textureSize];
 
-    mkLabel(@"Anisotropic Filtering:", 288);
-    self.anisoPopup = mkPopup(286);
+    mkLabel(@"Anisotropic Filtering:", 290);
+    self.anisoPopup = mkPopup(288);
     [self.anisoPopup addItemWithTitle:@"15x (Max)"]; self.anisoPopup.lastItem.tag = 15;
     [self.anisoPopup addItemWithTitle:@"8x"]; self.anisoPopup.lastItem.tag = 8;
     [self.anisoPopup addItemWithTitle:@"4x"]; self.anisoPopup.lastItem.tag = 4;
@@ -675,67 +794,68 @@ static NSString *exeHash(NSURL *url) {
     [self.anisoPopup addItemWithTitle:@"Off"]; self.anisoPopup.lastItem.tag = 0;
     if (![self.anisoPopup selectItemWithTag:opts.anisotropy]) [self.anisoPopup selectItemWithTag:15];
 
-    mkLabel(@"Shadow Quality:", 254);
-    self.shadowPopup = mkPopup(252);
+    mkLabel(@"Shadow Quality:", 256);
+    self.shadowPopup = mkPopup(254);
     [self.shadowPopup addItemWithTitle:@"Ultra (1024)"]; self.shadowPopup.lastItem.tag = 3;
     [self.shadowPopup addItemWithTitle:@"High (512)"]; self.shadowPopup.lastItem.tag = 2;
     [self.shadowPopup addItemWithTitle:@"Medium (256)"]; self.shadowPopup.lastItem.tag = 1;
     [self.shadowPopup addItemWithTitle:@"Off"]; self.shadowPopup.lastItem.tag = 0;
     [self.shadowPopup selectItemWithTag:opts.shadowQuality];
 
-    mkLabel(@"Water Detail:", 220);
-    self.waterPopup = mkPopup(218);
+    mkLabel(@"Water Detail:", 222);
+    self.waterPopup = mkPopup(220);
     [self.waterPopup addItemWithTitle:@"Ultra (1024 Reflections)"]; self.waterPopup.lastItem.tag = 3;
     [self.waterPopup addItemWithTitle:@"High (512 Reflections)"]; self.waterPopup.lastItem.tag = 2;
     [self.waterPopup addItemWithTitle:@"Medium (512 Reflections)"]; self.waterPopup.lastItem.tag = 1;
     [self.waterPopup addItemWithTitle:@"Low (Off)"]; self.waterPopup.lastItem.tag = 0;
     [self.waterPopup selectItemWithTag:opts.waterQuality];
 
-    mkLabel(@"Screen Effects:", 186);
-    self.effectsPopup = mkPopup(184);
+    mkLabel(@"Screen Effects:", 188);
+    self.effectsPopup = mkPopup(186);
     [self.effectsPopup addItemWithTitle:@"HDR + Depth of Field"]; self.effectsPopup.lastItem.tag = 3;
     [self.effectsPopup addItemWithTitle:@"HDR Only"]; self.effectsPopup.lastItem.tag = 2;
     [self.effectsPopup addItemWithTitle:@"Bloom"]; self.effectsPopup.lastItem.tag = 1;
     [self.effectsPopup addItemWithTitle:@"Off"]; self.effectsPopup.lastItem.tag = 0;
     [self.effectsPopup selectItemWithTag:opts.screenEffects];
 
-    mkLabel(@"Display Mode:", 152);
-    self.displayPopup = mkPopup(150);
+    mkLabel(@"Display Mode:", 154);
+    self.displayPopup = mkPopup(152);
     [self.displayPopup addItemWithTitle:@"Fullscreen"]; self.displayPopup.lastItem.tag = 1;
     [self.displayPopup addItemWithTitle:@"Windowed"]; self.displayPopup.lastItem.tag = 0;
     [self.displayPopup selectItemWithTag:opts.fullscreen ? 1 : 0];
 
     self.mouseAccelCheck = [NSButton checkboxWithTitle:@"Disable in-game mouse acceleration (menus & camera)"
                                                 target:nil action:nil];
-    self.mouseAccelCheck.frame = NSMakeRect(24, 118, 432, 18);
+    self.mouseAccelCheck.frame = NSMakeRect(24, 120, 432, 18);
     self.mouseAccelCheck.state = opts.disableMouseAccel ? NSControlStateValueOn : NSControlStateValueOff;
     [cv addSubview:self.mouseAccelCheck];
 
     NSTextField *mouseTip = [NSTextField labelWithString:@"Tip: for external mice, also disable Pointer Acceleration in System Settings → Mouse."];
     mouseTip.font = [NSFont systemFontOfSize:11];
     mouseTip.textColor = NSColor.secondaryLabelColor;
-    mouseTip.frame = NSMakeRect(42, 98, 414, 15);
+    mouseTip.frame = NSMakeRect(42, 100, 414, 15);
     [cv addSubview:mouseTip];
 
     self.skipLauncherCheck = [NSButton checkboxWithTitle:@"Skip this window on next launch (hold Option ⌥ to reopen)"
                                                   target:nil action:nil];
-    self.skipLauncherCheck.frame = NSMakeRect(24, 72, 432, 18);
+    self.skipLauncherCheck.frame = NSMakeRect(24, 74, 432, 18);
     self.skipLauncherCheck.state = opts.skipLauncher ? NSControlStateValueOn : NSControlStateValueOff;
     [cv addSubview:self.skipLauncherCheck];
 
-    NSBox *sep2 = [[NSBox alloc] initWithFrame:NSMakeRect(24, 56, 432, 1)];
+    NSBox *sep2 = [[NSBox alloc] initWithFrame:NSMakeRect(24, 58, 432, 1)];
     sep2.boxType = NSBoxSeparator;
     [cv addSubview:sep2];
 
     NSButton *quitBtn = [NSButton buttonWithTitle:@"Quit" target:self action:@selector(quitClicked:)];
-    quitBtn.frame = NSMakeRect(276, 16, 88, 30);
+    quitBtn.frame = NSMakeRect(276, 18, 88, 30);
     [cv addSubview:quitBtn];
 
     NSButton *playBtn = [NSButton buttonWithTitle:@"Play" target:self action:@selector(playClicked:)];
-    playBtn.frame = NSMakeRect(372, 16, 84, 30);
+    playBtn.frame = NSMakeRect(372, 18, 84, 30);
     playBtn.keyEquivalent = @"\r";
     [cv addSubview:playBtn];
 
+    [self updateResolutionPreview];
     [self updateDetailControlsEnabled];
     [self.optionsWindow center];
     [self.optionsWindow makeKeyAndOrderFront:nil];
@@ -745,8 +865,10 @@ static NSString *exeHash(NSURL *url) {
 
 - (void)setupGameWindowWithFullscreen:(BOOL)fullscreen scale:(CGFloat)scale screen:(NSScreen *)screen {
     NSRect vis = screen ? screen.visibleFrame : NSMakeRect(0, 0, 1280, 720);
-    CGFloat w = fnv_display_width() / scale;
-    CGFloat h = fnv_display_height() / scale;
+    unsigned outW = fnv_output_width() ? fnv_output_width() : fnv_display_width();
+    unsigned outH = fnv_output_height() ? fnv_output_height() : fnv_display_height();
+    CGFloat w = outW / scale;
+    CGFloat h = outH / scale;
     CGFloat fit = MIN(0.88, MIN(vis.size.width / w, (vis.size.height - 28.0) / h));
     NSRect winRect = NSMakeRect(0, 0, floor(w * fit), floor(h * fit));
 
@@ -859,6 +981,9 @@ static NSString *exeHash(NSURL *url) {
     CGFloat scale = screen ? screen.backingScaleFactor : 2.0;
     unsigned nativeW = 0, nativeH = 0, backingW = 0, backingH = 0;
     detectPhysicalDisplayPixels(screen, &nativeW, &nativeH, &backingW, &backingH);
+    int hz = (screen && [screen respondsToSelector:@selector(maximumFramesPerSecond)]) ? (int)screen.maximumFramesPerSecond : 60;
+    if (hz <= 0) hz = 60;
+    fnv_display_set_refresh(hz);
     fnv_display_configure(nativeW, nativeH);
     if (backingW != nativeW || backingH != nativeH) {
         fprintf(stderr, "[display] physical panel %ux%u (desktop backing %ux%u)\n",
@@ -884,8 +1009,6 @@ static NSString *exeHash(NSURL *url) {
     thread.stackSize = 16 * 1024 * 1024;
     [thread start];
 #else
-    int hz = (screen && [screen respondsToSelector:@selector(maximumFramesPerSecond)]) ? (int)screen.maximumFramesPerSecond : 60;
-    if (hz <= 0) hz = 60;
     self.nativeW = nativeW;
     self.nativeH = nativeH;
     self.backingW = backingW;
@@ -911,6 +1034,9 @@ static NSString *exeHash(NSURL *url) {
 - (void)launchWithOptions:(FalloutOptions)opts {
     NSScreen *screen = NSScreen.mainScreen ?: NSScreen.screens.firstObject;
     CGFloat scale = self.screenScale ?: 2.0;
+
+    fnv_display_configure_scaled(self.nativeW, self.nativeH, opts.renderScale);
+    fnv_graphics_configure(opts.upscaler, opts.antiAliasing);
 
     self.gameLaunched = YES;
     [self setupGameWindowWithFullscreen:opts.fullscreen scale:scale screen:screen];
@@ -1294,8 +1420,11 @@ static NSString *exeHash(NSURL *url) {
     [fm createDirectoryAtPath:prefs.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:NULL];
     NSError *prefsError = nil;
     BOOL prefsOK = [[lines componentsJoinedByString:@"\n"] writeToFile:prefs atomically:YES encoding:NSISOLatin1StringEncoding error:&prefsError];
-    fprintf(stderr, "[display] native %ux%u; preset=%d tex=%d aniso=%d shadow=%d water=%d fx=%d mouse_accel=%d; user=%s; preferences=%s\n",
-            fnv_display_width(), fnv_display_height(), opts.preset, opts.textureSize, opts.anisotropy,
+    fprintf(stderr, "[display] render %ux%u -> output %ux%u (scale=%u%% upscaler=%s aa=%s); preset=%d tex=%d aniso=%d shadow=%d water=%d fx=%d mouse_accel=%d; user=%s; preferences=%s\n",
+            fnv_display_width(), fnv_display_height(), fnv_output_width(), fnv_output_height(),
+            opts.renderScale, opts.upscaler == 1 ? "metalfx" : "bilinear",
+            opts.antiAliasing == 1 ? "smaa" : (opts.antiAliasing == 2 ? "fxaa" : "off"),
+            opts.preset, opts.textureSize, opts.anisotropy,
             opts.shadowQuality, opts.waterQuality, opts.screenEffects, opts.disableMouseAccel ? 0 : 1,
             userDir.fileSystemRepresentation,
             prefsOK ? "written" : prefsError.localizedDescription.UTF8String);
