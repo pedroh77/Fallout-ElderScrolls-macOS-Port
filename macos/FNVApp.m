@@ -17,21 +17,23 @@
 #include <unistd.h>
 
 #ifdef FNV_GAME_FALLOUT3
-#define GAME_TITLE @"Fallout 3"
-#define GAME_EXE   @"Fallout3.exe"
-#define GAME_ESM   @"Data/Fallout3.esm"
-#define GAME_DIR   @"Fallout3"
-#define GAME_LOG   @"fallout3.log"
-#define GAME_ARGV0 "f3-macos"
-#define GAME_EXE_C "Fallout3.exe"
+#define GAME_TITLE       @"Fallout 3"
+#define GAME_EXE         @"Fallout3.exe"
+#define GAME_ESM         @"Data/Fallout3.esm"
+#define GAME_DIR         @"Fallout3"
+#define GAME_LOG         @"fallout3.log"
+#define GAME_ARGV0       "f3-macos"
+#define GAME_EXE_C       "Fallout3.exe"
+#define GAME_PREF_PREFIX @"Fallout3"
 #else
-#define GAME_TITLE @"Fallout: New Vegas"
-#define GAME_EXE   @"FalloutNV.exe"
-#define GAME_ESM   @"Data/FalloutNV.esm"
-#define GAME_DIR   @"FalloutNV"
-#define GAME_LOG   @"fnv.log"
-#define GAME_ARGV0 "fnv-macos"
-#define GAME_EXE_C "FalloutNV.exe"
+#define GAME_TITLE       @"Fallout: New Vegas"
+#define GAME_EXE         @"FalloutNV.exe"
+#define GAME_ESM         @"Data/FalloutNV.esm"
+#define GAME_DIR         @"FalloutNV"
+#define GAME_LOG         @"fnv.log"
+#define GAME_ARGV0       "fnv-macos"
+#define GAME_EXE_C       "FalloutNV.exe"
+#define GAME_PREF_PREFIX @"FNV"
 #endif
 
 static CAMetalLayer *screenLayer;
@@ -65,6 +67,7 @@ static CGSize lockedDrawableSize;
     [self applyLockedDrawableSize];
 }
 @end
+
 static NSWindow *mainWindow;
 static pthread_mutex_t activeLock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t activeChanged = PTHREAD_COND_INITIALIZER;
@@ -215,6 +218,136 @@ static const uint8_t mac2dik[128] = {
 };
 
 #ifndef FNV_PROBE
+static NSString *prefKey(NSString *suffix) {
+    return [GAME_PREF_PREFIX stringByAppendingString:suffix];
+}
+
+typedef struct {
+    int preset;          // 0=Keep FalloutPrefs.ini, 1=Low, 2=Medium, 3=High, 4=Ultra
+    int textureSize;     // 0=Large (skip 0), 1=Medium (skip 1), 2=Small (skip 2)
+    int anisotropy;      // 0, 2, 4, 8, 15
+    int shadowQuality;   // 0=Off, 1=Medium (256), 2=High (512), 3=Ultra (1024)
+    int waterQuality;    // 0=Low, 1=Medium, 2=High (512), 3=Ultra (1024)
+    int screenEffects;   // 0=Off, 1=Bloom, 2=HDR, 3=HDR + Depth of Field
+    BOOL fullscreen;
+    BOOL disableMouseAccel;
+    BOOL skipLauncher;
+} FalloutOptions;
+
+static void applyPresetDefaults(FalloutOptions *opts, int preset) {
+    switch (preset) {
+    case 1: // Low
+        opts->textureSize = 1; opts->anisotropy = 0; opts->shadowQuality = 0;
+        opts->waterQuality = 0; opts->screenEffects = 0;
+        break;
+    case 2: // Medium
+        opts->textureSize = 0; opts->anisotropy = 2; opts->shadowQuality = 1;
+        opts->waterQuality = 1; opts->screenEffects = 2;
+        break;
+    case 3: // High
+        opts->textureSize = 0; opts->anisotropy = 8; opts->shadowQuality = 2;
+        opts->waterQuality = 2; opts->screenEffects = 3;
+        break;
+    case 4: // Ultra
+    default:
+        opts->textureSize = 0; opts->anisotropy = 15; opts->shadowQuality = 3;
+        opts->waterQuality = 3; opts->screenEffects = 3;
+        break;
+    }
+}
+
+static FalloutOptions loadOptions(void) {
+    NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
+    FalloutOptions opts;
+    id pObj = [ud objectForKey:prefKey(@"QualityPreset")];
+    opts.preset = pObj ? (int)[pObj integerValue] : 4; // Ultra default
+    if (opts.preset < 0 || opts.preset > 4) opts.preset = 4;
+    applyPresetDefaults(&opts, opts.preset > 0 ? opts.preset : 4);
+
+    id tObj = [ud objectForKey:prefKey(@"TextureSize")];
+    if (tObj) { opts.textureSize = (int)[tObj integerValue]; if (opts.textureSize < 0 || opts.textureSize > 2) opts.textureSize = 0; }
+    id aObj = [ud objectForKey:prefKey(@"Anisotropy")];
+    if (aObj) { opts.anisotropy = (int)[aObj integerValue]; if (opts.anisotropy < 0 || opts.anisotropy > 16) opts.anisotropy = 15; }
+    id sObj = [ud objectForKey:prefKey(@"ShadowQuality")];
+    if (sObj) { opts.shadowQuality = (int)[sObj integerValue]; if (opts.shadowQuality < 0 || opts.shadowQuality > 3) opts.shadowQuality = 3; }
+    id wObj = [ud objectForKey:prefKey(@"WaterQuality")];
+    if (wObj) { opts.waterQuality = (int)[wObj integerValue]; if (opts.waterQuality < 0 || opts.waterQuality > 3) opts.waterQuality = 3; }
+    id eObj = [ud objectForKey:prefKey(@"ScreenEffects")];
+    if (eObj) { opts.screenEffects = (int)[eObj integerValue]; if (opts.screenEffects < 0 || opts.screenEffects > 3) opts.screenEffects = 3; }
+    id fsObj = [ud objectForKey:prefKey(@"Fullscreen")];
+    opts.fullscreen = fsObj ? [fsObj boolValue] : YES;
+    id maObj = [ud objectForKey:prefKey(@"DisableMouseAccel")];
+    opts.disableMouseAccel = maObj ? [maObj boolValue] : YES;
+    id skObj = [ud objectForKey:prefKey(@"SkipLauncher")];
+    opts.skipLauncher = skObj ? [skObj boolValue] : NO;
+
+    const char *envPreset = getenv("FNV_PRESET");
+    if (envPreset && envPreset[0]) {
+        if (!strcasecmp(envPreset, "keep") || !strcmp(envPreset, "0")) opts.preset = 0;
+        else if (!strcasecmp(envPreset, "low") || !strcmp(envPreset, "1")) { opts.preset = 1; applyPresetDefaults(&opts, 1); }
+        else if (!strcasecmp(envPreset, "medium") || !strcmp(envPreset, "2")) { opts.preset = 2; applyPresetDefaults(&opts, 2); }
+        else if (!strcasecmp(envPreset, "high") || !strcmp(envPreset, "3")) { opts.preset = 3; applyPresetDefaults(&opts, 3); }
+        else if (!strcasecmp(envPreset, "ultra") || !strcmp(envPreset, "4")) { opts.preset = 4; applyPresetDefaults(&opts, 4); }
+    }
+    const char *envMA = getenv("FNV_MOUSE_ACCEL");
+    if (envMA && envMA[0]) opts.disableMouseAccel = (atoi(envMA) == 0);
+    if (getenv("FNV_WINDOWED")) opts.fullscreen = NO;
+    return opts;
+}
+
+static void saveOptions(FalloutOptions opts) {
+    NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
+    [ud setInteger:opts.preset forKey:prefKey(@"QualityPreset")];
+    [ud setInteger:opts.textureSize forKey:prefKey(@"TextureSize")];
+    [ud setInteger:opts.anisotropy forKey:prefKey(@"Anisotropy")];
+    [ud setInteger:opts.shadowQuality forKey:prefKey(@"ShadowQuality")];
+    [ud setInteger:opts.waterQuality forKey:prefKey(@"WaterQuality")];
+    [ud setInteger:opts.screenEffects forKey:prefKey(@"ScreenEffects")];
+    [ud setBool:opts.fullscreen forKey:prefKey(@"Fullscreen")];
+    [ud setBool:opts.disableMouseAccel forKey:prefKey(@"DisableMouseAccel")];
+    [ud setBool:opts.skipLauncher forKey:prefKey(@"SkipLauncher")];
+    [ud synchronize];
+}
+
+static void applyIniSettings(NSMutableArray<NSString *> *lines, NSDictionary<NSString *, NSDictionary *> *settings) {
+    for (NSString *section in settings) {
+        NSDictionary *keys = settings[section];
+        NSMutableSet *pending = [NSMutableSet setWithArray:keys.allKeys];
+        BOOL inside = NO;
+        NSInteger insert = -1;
+        for (NSUInteger i = 0; i < lines.count; i++) {
+            NSString *line = [lines[i] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+            if ([line hasPrefix:@"["] && [line hasSuffix:@"]"]) {
+                if (inside && insert < 0) insert = (NSInteger)i;
+                inside = [[[line substringWithRange:NSMakeRange(1, line.length - 2)] lowercaseString] isEqualToString:section];
+            } else if (inside) {
+                NSRange equal = [line rangeOfString:@"="];
+                if (equal.location != NSNotFound) {
+                    NSString *key = [[[line substringToIndex:equal.location] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet] lowercaseString];
+                    NSArray *value = keys[key];
+                    if (value) {
+                        lines[i] = [NSString stringWithFormat:@"%@=%@", value[0], value[1]];
+                        [pending removeObject:key];
+                    }
+                }
+            }
+        }
+        if (pending.count > 0) {
+            if (insert < 0) {
+                insert = (NSInteger)lines.count;
+                if (!inside) {
+                    [lines addObject:[NSString stringWithFormat:@"[%@]", section]];
+                    insert++;
+                }
+            }
+            for (NSString *key in pending) {
+                NSArray *value = keys[key];
+                [lines insertObject:[NSString stringWithFormat:@"%@=%@", value[0], value[1]] atIndex:(NSUInteger)insert++];
+            }
+        }
+    }
+}
+
 static NSString *exeHash(NSURL *url) {
     NSInputStream *stream = [NSInputStream inputStreamWithURL:url];
     CC_SHA256_CTX hash;
@@ -241,6 +374,27 @@ static NSString *exeHash(NSURL *url) {
 @property (nonatomic, strong) NSTimer *padTimer;
 @property (nonatomic) BOOL cursorCaptured;
 @property (nonatomic) id eventMonitor;
+#ifndef FNV_PROBE
+@property (nonatomic, strong) NSWindow *optionsWindow;
+@property (nonatomic, strong) NSPopUpButton *presetPopup;
+@property (nonatomic, strong) NSPopUpButton *texturePopup;
+@property (nonatomic, strong) NSPopUpButton *anisoPopup;
+@property (nonatomic, strong) NSPopUpButton *shadowPopup;
+@property (nonatomic, strong) NSPopUpButton *waterPopup;
+@property (nonatomic, strong) NSPopUpButton *effectsPopup;
+@property (nonatomic, strong) NSPopUpButton *displayPopup;
+@property (nonatomic, strong) NSButton *mouseAccelCheck;
+@property (nonatomic, strong) NSButton *skipLauncherCheck;
+@property (nonatomic) unsigned nativeW;
+@property (nonatomic) unsigned nativeH;
+@property (nonatomic) unsigned backingW;
+@property (nonatomic) unsigned backingH;
+@property (nonatomic) CGFloat screenScale;
+@property (nonatomic) int refreshHz;
+@property (nonatomic, strong) NSURL *logDir;
+@property (nonatomic, strong) NSURL *logURL;
+@property (nonatomic) BOOL gameLaunched;
+#endif
 @end
 
 @implementation AppDelegate
@@ -259,6 +413,13 @@ static NSString *exeHash(NSURL *url) {
     [appMenu addItemWithTitle:[@"Hide " stringByAppendingString:title]
                        action:@selector(hide:)
                 keyEquivalent:@"h"];
+#ifndef FNV_PROBE
+    [appMenu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *optItem = [appMenu addItemWithTitle:@"Show Options on Next Launch"
+                                             action:@selector(enableOptionsOnNextLaunch:)
+                                      keyEquivalent:@""];
+    optItem.target = self;
+#endif
     NSMenuItem *quitItem = [appMenu addItemWithTitle:[@"Quit " stringByAppendingString:title]
                                               action:@selector(terminate:)
                                        keyEquivalent:@"q"];
@@ -388,16 +549,201 @@ static NSString *exeHash(NSURL *url) {
     self.statusLabel.hidden = (message == nil || message.length == 0);
 }
 
-- (void)applicationDidFinishLaunching:(NSNotification *)note {
-    (void)note;
-    [self setupMenus];
+#ifndef FNV_PROBE
+- (void)enableOptionsOnNextLaunch:(id)sender {
+    (void)sender;
+    [NSUserDefaults.standardUserDefaults setBool:NO forKey:prefKey(@"SkipLauncher")];
+    [NSUserDefaults.standardUserDefaults synchronize];
+}
 
-    NSScreen *screen = NSScreen.mainScreen ?: NSScreen.screens.firstObject;
-    CGFloat scale = screen ? screen.backingScaleFactor : 2.0;
-    unsigned nativeW = 0, nativeH = 0, backingW = 0, backingH = 0;
-    detectPhysicalDisplayPixels(screen, &nativeW, &nativeH, &backingW, &backingH);
-    fnv_display_configure(nativeW, nativeH);
+- (void)updateDetailControlsEnabled {
+    BOOL enable = (self.presetPopup.selectedItem.tag != 0);
+    self.texturePopup.enabled = enable;
+    self.anisoPopup.enabled = enable;
+    self.shadowPopup.enabled = enable;
+    self.waterPopup.enabled = enable;
+    self.effectsPopup.enabled = enable;
+}
 
+- (void)presetChanged:(id)sender {
+    (void)sender;
+    int p = (int)self.presetPopup.selectedItem.tag;
+    if (p > 0) {
+        FalloutOptions tmp = {0};
+        applyPresetDefaults(&tmp, p);
+        [self.texturePopup selectItemWithTag:tmp.textureSize];
+        [self.anisoPopup selectItemWithTag:tmp.anisotropy];
+        [self.shadowPopup selectItemWithTag:tmp.shadowQuality];
+        [self.waterPopup selectItemWithTag:tmp.waterQuality];
+        [self.effectsPopup selectItemWithTag:tmp.screenEffects];
+    }
+    [self updateDetailControlsEnabled];
+}
+
+- (void)quitClicked:(id)sender {
+    (void)sender;
+    [NSApp terminate:nil];
+}
+
+- (void)playClicked:(id)sender {
+    (void)sender;
+    FalloutOptions opts;
+    opts.preset = (int)self.presetPopup.selectedItem.tag;
+    opts.textureSize = (int)self.texturePopup.selectedItem.tag;
+    opts.anisotropy = (int)self.anisoPopup.selectedItem.tag;
+    opts.shadowQuality = (int)self.shadowPopup.selectedItem.tag;
+    opts.waterQuality = (int)self.waterPopup.selectedItem.tag;
+    opts.screenEffects = (int)self.effectsPopup.selectedItem.tag;
+    opts.fullscreen = (self.displayPopup.selectedItem.tag != 0);
+    opts.disableMouseAccel = (self.mouseAccelCheck.state == NSControlStateValueOn);
+    opts.skipLauncher = (self.skipLauncherCheck.state == NSControlStateValueOn);
+    saveOptions(opts);
+    if (getenv("FNV_WINDOWED")) opts.fullscreen = NO;
+    const char *envMA = getenv("FNV_MOUSE_ACCEL");
+    if (envMA && envMA[0]) opts.disableMouseAccel = (atoi(envMA) == 0);
+    [self launchWithOptions:opts];
+}
+
+- (void)showOptionsWindow:(FalloutOptions)opts {
+    NSRect rect = NSMakeRect(0, 0, 480, 462);
+    self.optionsWindow = [[NSWindow alloc] initWithContentRect:rect
+                                                     styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
+                                                       backing:NSBackingStoreBuffered
+                                                         defer:NO];
+    self.optionsWindow.title = [NSString stringWithFormat:@"%@ — Options", GAME_TITLE];
+    self.optionsWindow.delegate = self;
+    self.optionsWindow.releasedWhenClosed = NO;
+    NSView *cv = self.optionsWindow.contentView;
+
+    NSTextField *title = [NSTextField labelWithString:@"Graphics & Input Options"];
+    title.font = [NSFont boldSystemFontOfSize:15];
+    title.frame = NSMakeRect(24, 426, 432, 22);
+    [cv addSubview:title];
+
+    NSString *dispStr = (self.backingW != self.nativeW || self.backingH != self.nativeH)
+        ? [NSString stringWithFormat:@"Display: %ux%u panel (desktop %ux%u) @ %d Hz  ·  MSAA Off",
+           self.nativeW, self.nativeH, self.backingW, self.backingH, self.refreshHz]
+        : [NSString stringWithFormat:@"Display: %ux%u @ %d Hz  ·  MSAA Off",
+           self.nativeW, self.nativeH, self.refreshHz];
+    NSTextField *sub = [NSTextField labelWithString:dispStr];
+    sub.font = [NSFont systemFontOfSize:12];
+    sub.textColor = NSColor.secondaryLabelColor;
+    sub.frame = NSMakeRect(24, 406, 432, 16);
+    [cv addSubview:sub];
+
+    NSBox *sep1 = [[NSBox alloc] initWithFrame:NSMakeRect(24, 394, 432, 1)];
+    sep1.boxType = NSBoxSeparator;
+    [cv addSubview:sep1];
+
+    NSTextField *(^mkLabel)(NSString *, CGFloat) = ^NSTextField *(NSString *txt, CGFloat y) {
+        NSTextField *l = [NSTextField labelWithString:txt];
+        l.alignment = NSTextAlignmentRight;
+        l.frame = NSMakeRect(24, y, 160, 20);
+        [cv addSubview:l];
+        return l;
+    };
+    NSPopUpButton *(^mkPopup)(CGFloat) = ^NSPopUpButton *(CGFloat y) {
+        NSPopUpButton *p = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(196, y, 260, 26) pullsDown:NO];
+        [cv addSubview:p];
+        return p;
+    };
+
+    mkLabel(@"Quality Preset:", 356);
+    self.presetPopup = mkPopup(354);
+    [self.presetPopup addItemWithTitle:@"Ultra (Recommended)"]; self.presetPopup.lastItem.tag = 4;
+    [self.presetPopup addItemWithTitle:@"High"]; self.presetPopup.lastItem.tag = 3;
+    [self.presetPopup addItemWithTitle:@"Medium"]; self.presetPopup.lastItem.tag = 2;
+    [self.presetPopup addItemWithTitle:@"Low"]; self.presetPopup.lastItem.tag = 1;
+    [self.presetPopup addItemWithTitle:@"Keep FalloutPrefs.ini"]; self.presetPopup.lastItem.tag = 0;
+    [self.presetPopup selectItemWithTag:opts.preset];
+    self.presetPopup.target = self;
+    self.presetPopup.action = @selector(presetChanged:);
+
+    mkLabel(@"Texture Size:", 322);
+    self.texturePopup = mkPopup(320);
+    [self.texturePopup addItemWithTitle:@"Large (High)"]; self.texturePopup.lastItem.tag = 0;
+    [self.texturePopup addItemWithTitle:@"Medium"]; self.texturePopup.lastItem.tag = 1;
+    [self.texturePopup addItemWithTitle:@"Small (Low)"]; self.texturePopup.lastItem.tag = 2;
+    [self.texturePopup selectItemWithTag:opts.textureSize];
+
+    mkLabel(@"Anisotropic Filtering:", 288);
+    self.anisoPopup = mkPopup(286);
+    [self.anisoPopup addItemWithTitle:@"15x (Max)"]; self.anisoPopup.lastItem.tag = 15;
+    [self.anisoPopup addItemWithTitle:@"8x"]; self.anisoPopup.lastItem.tag = 8;
+    [self.anisoPopup addItemWithTitle:@"4x"]; self.anisoPopup.lastItem.tag = 4;
+    [self.anisoPopup addItemWithTitle:@"2x"]; self.anisoPopup.lastItem.tag = 2;
+    [self.anisoPopup addItemWithTitle:@"Off"]; self.anisoPopup.lastItem.tag = 0;
+    if (![self.anisoPopup selectItemWithTag:opts.anisotropy]) [self.anisoPopup selectItemWithTag:15];
+
+    mkLabel(@"Shadow Quality:", 254);
+    self.shadowPopup = mkPopup(252);
+    [self.shadowPopup addItemWithTitle:@"Ultra (1024)"]; self.shadowPopup.lastItem.tag = 3;
+    [self.shadowPopup addItemWithTitle:@"High (512)"]; self.shadowPopup.lastItem.tag = 2;
+    [self.shadowPopup addItemWithTitle:@"Medium (256)"]; self.shadowPopup.lastItem.tag = 1;
+    [self.shadowPopup addItemWithTitle:@"Off"]; self.shadowPopup.lastItem.tag = 0;
+    [self.shadowPopup selectItemWithTag:opts.shadowQuality];
+
+    mkLabel(@"Water Detail:", 220);
+    self.waterPopup = mkPopup(218);
+    [self.waterPopup addItemWithTitle:@"Ultra (1024 Reflections)"]; self.waterPopup.lastItem.tag = 3;
+    [self.waterPopup addItemWithTitle:@"High (512 Reflections)"]; self.waterPopup.lastItem.tag = 2;
+    [self.waterPopup addItemWithTitle:@"Medium (512 Reflections)"]; self.waterPopup.lastItem.tag = 1;
+    [self.waterPopup addItemWithTitle:@"Low (Off)"]; self.waterPopup.lastItem.tag = 0;
+    [self.waterPopup selectItemWithTag:opts.waterQuality];
+
+    mkLabel(@"Screen Effects:", 186);
+    self.effectsPopup = mkPopup(184);
+    [self.effectsPopup addItemWithTitle:@"HDR + Depth of Field"]; self.effectsPopup.lastItem.tag = 3;
+    [self.effectsPopup addItemWithTitle:@"HDR Only"]; self.effectsPopup.lastItem.tag = 2;
+    [self.effectsPopup addItemWithTitle:@"Bloom"]; self.effectsPopup.lastItem.tag = 1;
+    [self.effectsPopup addItemWithTitle:@"Off"]; self.effectsPopup.lastItem.tag = 0;
+    [self.effectsPopup selectItemWithTag:opts.screenEffects];
+
+    mkLabel(@"Display Mode:", 152);
+    self.displayPopup = mkPopup(150);
+    [self.displayPopup addItemWithTitle:@"Fullscreen"]; self.displayPopup.lastItem.tag = 1;
+    [self.displayPopup addItemWithTitle:@"Windowed"]; self.displayPopup.lastItem.tag = 0;
+    [self.displayPopup selectItemWithTag:opts.fullscreen ? 1 : 0];
+
+    self.mouseAccelCheck = [NSButton checkboxWithTitle:@"Disable in-game mouse acceleration (menus & camera)"
+                                                target:nil action:nil];
+    self.mouseAccelCheck.frame = NSMakeRect(24, 118, 432, 18);
+    self.mouseAccelCheck.state = opts.disableMouseAccel ? NSControlStateValueOn : NSControlStateValueOff;
+    [cv addSubview:self.mouseAccelCheck];
+
+    NSTextField *mouseTip = [NSTextField labelWithString:@"Tip: for external mice, also disable Pointer Acceleration in System Settings → Mouse."];
+    mouseTip.font = [NSFont systemFontOfSize:11];
+    mouseTip.textColor = NSColor.secondaryLabelColor;
+    mouseTip.frame = NSMakeRect(42, 98, 414, 15);
+    [cv addSubview:mouseTip];
+
+    self.skipLauncherCheck = [NSButton checkboxWithTitle:@"Skip this window on next launch (hold Option ⌥ to reopen)"
+                                                  target:nil action:nil];
+    self.skipLauncherCheck.frame = NSMakeRect(24, 72, 432, 18);
+    self.skipLauncherCheck.state = opts.skipLauncher ? NSControlStateValueOn : NSControlStateValueOff;
+    [cv addSubview:self.skipLauncherCheck];
+
+    NSBox *sep2 = [[NSBox alloc] initWithFrame:NSMakeRect(24, 56, 432, 1)];
+    sep2.boxType = NSBoxSeparator;
+    [cv addSubview:sep2];
+
+    NSButton *quitBtn = [NSButton buttonWithTitle:@"Quit" target:self action:@selector(quitClicked:)];
+    quitBtn.frame = NSMakeRect(276, 16, 88, 30);
+    [cv addSubview:quitBtn];
+
+    NSButton *playBtn = [NSButton buttonWithTitle:@"Play" target:self action:@selector(playClicked:)];
+    playBtn.frame = NSMakeRect(372, 16, 84, 30);
+    playBtn.keyEquivalent = @"\r";
+    [cv addSubview:playBtn];
+
+    [self updateDetailControlsEnabled];
+    [self.optionsWindow center];
+    [self.optionsWindow makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+}
+#endif
+
+- (void)setupGameWindowWithFullscreen:(BOOL)fullscreen scale:(CGFloat)scale screen:(NSScreen *)screen {
     NSRect vis = screen ? screen.visibleFrame : NSMakeRect(0, 0, 1280, 720);
     CGFloat w = fnv_display_width() / scale;
     CGFloat h = fnv_display_height() / scale;
@@ -441,7 +787,10 @@ static NSString *exeHash(NSURL *url) {
     [self.window makeKeyAndOrderFront:nil];
     [self.window makeFirstResponder:self.metalView];
     [NSApp activateIgnoringOtherApps:YES];
-    if (!getenv("FNV_WINDOWED")) {
+
+    const char *headlessEnv = getenv("FNV_HEADLESS");
+    BOOL isHeadless = (headlessEnv && headlessEnv[0] && headlessEnv[0] != '0');
+    if (fullscreen && !isHeadless) {
         [self.window toggleFullScreen:nil];
     }
 
@@ -486,6 +835,11 @@ static NSString *exeHash(NSURL *url) {
                                                      repeats:YES
                                                        block:^(NSTimer *t) { (void)t; [weakSelf pollControllers]; }];
     [self pollControllers];
+}
+
+- (void)applicationDidFinishLaunching:(NSNotification *)note {
+    (void)note;
+    [self setupMenus];
 
     NSFileManager *fm = NSFileManager.defaultManager;
     NSURL *libURL = [fm URLsForDirectory:NSLibraryDirectory inDomains:NSUserDomainMask].firstObject;
@@ -500,14 +854,76 @@ static NSString *exeHash(NSURL *url) {
     NSString *revision = [NSBundle.mainBundle objectForInfoDictionaryKey:@"FNVBuildSourceCommit"] ?: @"unknown";
     NSString *buildVersion = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"unknown";
     fprintf(stderr, "[build] source=%s version=%s\n", revision.UTF8String, buildVersion.UTF8String);
+
+    NSScreen *screen = NSScreen.mainScreen ?: NSScreen.screens.firstObject;
+    CGFloat scale = screen ? screen.backingScaleFactor : 2.0;
+    unsigned nativeW = 0, nativeH = 0, backingW = 0, backingH = 0;
+    detectPhysicalDisplayPixels(screen, &nativeW, &nativeH, &backingW, &backingH);
+    fnv_display_configure(nativeW, nativeH);
     if (backingW != nativeW || backingH != nativeH) {
         fprintf(stderr, "[display] physical panel %ux%u (desktop backing %ux%u)\n",
                 nativeW, nativeH, backingW, backingH);
     }
 
 #ifdef FNV_PROBE
+    [self setupGameWindowWithFullscreen:(getenv("FNV_WINDOWED") == NULL) scale:scale screen:screen];
     [self showStatus:@"Input / Metal Probe — Move mouse for R/G, W/S or controller for Blue. Cmd+Q to quit."];
+    [self setCursorCapture:YES];
+    NSThread *thread = [[NSThread alloc] initWithBlock:^{
+        @autoreleasepool {
+            fnv_wait_active();
+            extern int fnv_probe(unsigned);
+            int rc = fnv_probe(0);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self setCursorCapture:NO];
+                if (rc == 0) [NSApp terminate:nil];
+                else [self showStatus:[NSString stringWithFormat:@"Host returned %d. See %@.", rc, logURL.path]];
+            });
+        }
+    }];
+    thread.stackSize = 16 * 1024 * 1024;
+    [thread start];
 #else
+    int hz = (screen && [screen respondsToSelector:@selector(maximumFramesPerSecond)]) ? (int)screen.maximumFramesPerSecond : 60;
+    if (hz <= 0) hz = 60;
+    self.nativeW = nativeW;
+    self.nativeH = nativeH;
+    self.backingW = backingW;
+    self.backingH = backingH;
+    self.screenScale = scale;
+    self.refreshHz = hz;
+    self.logDir = logDir;
+    self.logURL = logURL;
+
+    FalloutOptions opts = loadOptions();
+    const char *headlessEnv = getenv("FNV_HEADLESS");
+    BOOL isHeadless = (headlessEnv && headlessEnv[0] && headlessEnv[0] != '0');
+    BOOL optionHeld = (NSEvent.modifierFlags & NSEventModifierFlagOption) != 0;
+    if (!isHeadless && !getenv("FNV_SKIP_LAUNCHER") && (!opts.skipLauncher || optionHeld)) {
+        [self showOptionsWindow:opts];
+        return;
+    }
+    [self launchWithOptions:opts];
+#endif
+}
+
+#ifndef FNV_PROBE
+- (void)launchWithOptions:(FalloutOptions)opts {
+    NSScreen *screen = NSScreen.mainScreen ?: NSScreen.screens.firstObject;
+    CGFloat scale = self.screenScale ?: 2.0;
+
+    self.gameLaunched = YES;
+    [self setupGameWindowWithFullscreen:opts.fullscreen scale:scale screen:screen];
+
+    if (self.optionsWindow) {
+        NSWindow *optionsWindow = self.optionsWindow;
+        self.optionsWindow = nil;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [optionsWindow close];
+        });
+    }
+
+    NSFileManager *fm = NSFileManager.defaultManager;
     NSURL *appSupport = [fm URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
     NSURL *userDir = [appSupport URLByAppendingPathComponent:[GAME_DIR stringByAppendingString:@"/UserDocuments"] isDirectory:YES];
     [fm createDirectoryAtURL:userDir withIntermediateDirectories:YES attributes:nil error:NULL];
@@ -545,7 +961,7 @@ static NSString *exeHash(NSURL *url) {
     }
 
     setenv("FNV_ROOT", root.fileSystemRepresentation, 1);
-    setenv("FNV_FALLBACK_LOG", [logDir URLByAppendingPathComponent:@"fallback_entries.txt"].fileSystemRepresentation, 1);
+    setenv("FNV_FALLBACK_LOG", [self.logDir URLByAppendingPathComponent:@"fallback_entries.txt"].fileSystemRepresentation, 1);
 
 #ifdef FNV_GAME_FALLOUT3
     NSString *localAppDir = [userDir.path stringByAppendingPathComponent:@"LocalAppData/Fallout3"];
@@ -568,8 +984,48 @@ static NSString *exeHash(NSURL *url) {
     }
 #endif
 
-    // Update display/controller keys in FalloutPrefs.ini while preserving all other user settings.
+    // Ensure My Games/<Game> directory and seed FALLOUT.INI from Fallout_default.ini on clean install.
     NSString *myGamesDir = [userDir.path stringByAppendingPathComponent:[@"My Games/" stringByAppendingString:GAME_DIR]];
+    [fm createDirectoryAtPath:myGamesDir withIntermediateDirectories:YES attributes:nil error:NULL];
+
+    NSString *mainIni = [myGamesDir stringByAppendingPathComponent:@"FALLOUT.INI"];
+    for (NSString *leaf in [fm contentsOfDirectoryAtPath:myGamesDir error:NULL]) {
+        if ([leaf caseInsensitiveCompare:@"FALLOUT.INI"] == NSOrderedSame) {
+            mainIni = [myGamesDir stringByAppendingPathComponent:leaf];
+            break;
+        }
+    }
+    if (![fm fileExistsAtPath:mainIni]) {
+        NSString *defaultIni = [root URLByAppendingPathComponent:@"Fallout_default.ini"].path;
+        if ([fm fileExistsAtPath:defaultIni]) {
+            [fm copyItemAtPath:defaultIni toPath:mainIni error:NULL];
+        }
+    }
+    if ([fm fileExistsAtPath:mainIni]) {
+        NSString *iniText = [NSString stringWithContentsOfFile:mainIni encoding:NSISOLatin1StringEncoding error:NULL] ?: @"";
+        NSMutableArray<NSString *> *iniLines = [[iniText componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet] mutableCopy];
+        NSDictionary *mouseSettings = opts.disableMouseAccel
+            ? @{
+                @"controls": @{
+                    @"fforegroundmouseaccelbase": @[@"fForegroundMouseAccelBase", @"0"],
+                    @"fforegroundmouseacceltop":  @[@"fForegroundMouseAccelTop",  @"0"],
+                    @"fforegroundmousebase":      @[@"fForegroundMouseBase",      @"0"],
+                    @"fforegroundmousemult":      @[@"fForegroundMouseMult",      @"0"],
+                },
+            }
+            : @{
+                @"controls": @{
+                    @"fforegroundmouseaccelbase": @[@"fForegroundMouseAccelBase", @"0.005"],
+                    @"fforegroundmouseacceltop":  @[@"fForegroundMouseAccelTop",  @"0.025"],
+                    @"fforegroundmousebase":      @[@"fForegroundMouseBase",      @"0"],
+                    @"fforegroundmousemult":      @[@"fForegroundMouseMult",      @"4"],
+                },
+            };
+        applyIniSettings(iniLines, mouseSettings);
+        [[iniLines componentsJoinedByString:@"\n"] writeToFile:mainIni atomically:YES encoding:NSISOLatin1StringEncoding error:NULL];
+    }
+
+    // Update display/graphics/controller keys in FalloutPrefs.ini while preserving all other user settings.
     NSString *prefs = [myGamesDir stringByAppendingPathComponent:@"FalloutPrefs.ini"];
     for (NSString *leaf in [fm contentsOfDirectoryAtPath:myGamesDir error:NULL]) {
         if ([leaf caseInsensitiveCompare:@"FalloutPrefs.ini"] == NSOrderedSame) {
@@ -582,51 +1038,212 @@ static NSString *exeHash(NSURL *url) {
         [fm copyItemAtPath:prefs toPath:[prefs stringByAppendingString:@".before-native-display"] error:NULL];
     }
     NSMutableArray<NSString *> *lines = [[text componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet] mutableCopy];
-    NSDictionary *settings = @{
-        @"display": @{
-            @"isize w": @[@"iSize W", @(fnv_display_width())],
-            @"isize h": @[@"iSize H", @(fnv_display_height())],
-            @"bfull screen": @[@"bFull Screen", @1],
-            @"sd3ddevice": @[@"sD3DDevice", @(fnv_display_adapter_description())],
-        },
+
+    NSMutableDictionary *displaySettings = [@{
+        @"isize w": @[@"iSize W", @(fnv_display_width())],
+        @"isize h": @[@"iSize H", @(fnv_display_height())],
+        @"bfull screen": @[@"bFull Screen", @1],
+        @"sd3ddevice": @[@"sD3DDevice", @(fnv_display_adapter_description())],
+        @"imultisample": @[@"iMultiSample", @0],
+        @"iwatermultisamples": @[@"iWaterMultisamples", @0],
+        @"btransparencymultisampling": @[@"bTransparencyMultisampling", @0],
+    } mutableCopy];
+    NSMutableDictionary *allSettings = [@{
+        @"display": displaySettings,
         @"controls": @{
             @"buse joystick": @[@"bUse Joystick", @1],
         },
-    };
-    for (NSString *section in settings) {
-        NSDictionary *keys = settings[section];
-        NSMutableSet *pending = [NSMutableSet setWithArray:keys.allKeys];
-        BOOL inside = NO;
-        NSInteger insert = -1;
-        for (NSUInteger i = 0; i < lines.count; i++) {
-            NSString *line = [lines[i] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
-            if ([line hasPrefix:@"["] && [line hasSuffix:@"]"]) {
-                if (inside && insert < 0) insert = (NSInteger)i;
-                inside = [[[line substringWithRange:NSMakeRange(1, line.length - 2)] lowercaseString] isEqualToString:section];
-            } else if (inside) {
-                NSRange equal = [line rangeOfString:@"="];
-                if (equal.location != NSNotFound) {
-                    NSString *key = [[[line substringToIndex:equal.location] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet] lowercaseString];
-                    NSArray *value = keys[key];
-                    if (value) {
-                        lines[i] = [NSString stringWithFormat:@"%@=%@", value[0], value[1]];
-                        [pending removeObject:key];
-                    }
-                }
-            }
+    } mutableCopy];
+
+    if (opts.preset > 0) {
+        // Base draw distances / LOD / terrain / grass / decals matching Bethesda's official presets.
+        if (opts.preset == 1) { // Low
+            displaySettings[@"imaxdecalsperframe"] = @[@"iMaxDecalsPerFrame", @2];
+            displaySettings[@"fspecularlodstartfade"] = @[@"fSpecularLODStartFade", @"200.0000"];
+            displaySettings[@"fshadowlodstartfade"] = @[@"fShadowLODStartFade", @"100.0000"];
+            displaySettings[@"flightlodstartfade"] = @[@"fLightLODStartFade", @"200.0000"];
+            allSettings[@"lod"] = @{
+                @"flodfadeoutmultactors":  @[@"fLODFadeOutMultActors",  @"2.0000"],
+                @"flodfadeoutmultobjects": @[@"fLODFadeOutMultObjects", @"2.5000"],
+                @"flodfadeoutmultitems":   @[@"fLODFadeOutMultItems",   @"1.0000"],
+            };
+            allSettings[@"terrainmanager"] = @{
+                @"ftreeloaddistance":         @[@"fTreeLoadDistance",         @"0.0000"],
+                @"fblockloaddistancelow":     @[@"fBlockLoadDistanceLow",     @"25000.0000"],
+                @"fblockloaddistance":        @[@"fBlockLoadDistance",        @"125000.0000"],
+                @"fsplitdistancemult":        @[@"fSplitDistanceMult",        @"0.7500"],
+                @"fhighblockloaddistancelow": @[@"fHighBlockLoadDistanceLow", @"20000.0000"],
+            };
+            allSettings[@"grass"] = @{
+                @"b30grassvs":              @[@"b30GrassVS",              @0],
+                @"fgrassstartfadedistance": @[@"fGrassStartFadeDistance", @"0.0000"],
+            };
+        } else if (opts.preset == 2) { // Medium
+            displaySettings[@"imaxdecalsperframe"] = @[@"iMaxDecalsPerFrame", @5];
+            displaySettings[@"fspecularlodstartfade"] = @[@"fSpecularLODStartFade", @"500.0000"];
+            displaySettings[@"fshadowlodstartfade"] = @[@"fShadowLODStartFade", @"200.0000"];
+            displaySettings[@"flightlodstartfade"] = @[@"fLightLODStartFade", @"1000.0000"];
+            allSettings[@"lod"] = @{
+                @"flodfadeoutmultactors":  @[@"fLODFadeOutMultActors",  @"2.5000"],
+                @"flodfadeoutmultobjects": @[@"fLODFadeOutMultObjects", @"2.5000"],
+                @"flodfadeoutmultitems":   @[@"fLODFadeOutMultItems",   @"3.5000"],
+            };
+            allSettings[@"terrainmanager"] = @{
+                @"ftreeloaddistance":         @[@"fTreeLoadDistance",         @"25000.0000"],
+                @"fblockloaddistancelow":     @[@"fBlockLoadDistanceLow",     @"50000.0000"],
+                @"fblockloaddistance":        @[@"fBlockLoadDistance",        @"125000.0000"],
+                @"fsplitdistancemult":        @[@"fSplitDistanceMult",        @"1.0000"],
+                @"fhighblockloaddistancelow": @[@"fHighBlockLoadDistanceLow", @"20000.0000"],
+            };
+            allSettings[@"grass"] = @{
+                @"b30grassvs":              @[@"b30GrassVS",              @0],
+                @"fgrassstartfadedistance": @[@"fGrassStartFadeDistance", @"3000.0000"],
+            };
+        } else if (opts.preset == 3) { // High
+            displaySettings[@"imaxdecalsperframe"] = @[@"iMaxDecalsPerFrame", @10];
+            displaySettings[@"fspecularlodstartfade"] = @[@"fSpecularLODStartFade", @"1000.0000"];
+            displaySettings[@"fshadowlodstartfade"] = @[@"fShadowLODStartFade", @"460.0000"];
+            displaySettings[@"flightlodstartfade"] = @[@"fLightLODStartFade", @"2500.0000"];
+            allSettings[@"lod"] = @{
+                @"flodfadeoutmultactors":  @[@"fLODFadeOutMultActors",  @"6.0000"],
+                @"flodfadeoutmultobjects": @[@"fLODFadeOutMultObjects", @"7.5000"],
+                @"flodfadeoutmultitems":   @[@"fLODFadeOutMultItems",   @"4.5000"],
+            };
+            allSettings[@"terrainmanager"] = @{
+                @"ftreeloaddistance":         @[@"fTreeLoadDistance",         @"26000.0000"],
+                @"fblockloaddistancelow":     @[@"fBlockLoadDistanceLow",     @"50000.0000"],
+                @"fblockloaddistance":        @[@"fBlockLoadDistance",        @"125000.0000"],
+                @"fsplitdistancemult":        @[@"fSplitDistanceMult",        @"1.0000"],
+                @"fhighblockloaddistancelow": @[@"fHighBlockLoadDistanceLow", @"20000.0000"],
+            };
+            allSettings[@"grass"] = @{
+                @"b30grassvs":              @[@"b30GrassVS",              @1],
+                @"fgrassstartfadedistance": @[@"fGrassStartFadeDistance", @"5000.0000"],
+            };
+        } else { // Ultra (4)
+            displaySettings[@"imaxdecalsperframe"] = @[@"iMaxDecalsPerFrame", @10];
+            displaySettings[@"fspecularlodstartfade"] = @[@"fSpecularLODStartFade", @"2000.0000"];
+            displaySettings[@"fshadowlodstartfade"] = @[@"fShadowLODStartFade", @"1000.0000"];
+            displaySettings[@"flightlodstartfade"] = @[@"fLightLODStartFade", @"3500.0000"];
+            allSettings[@"lod"] = @{
+                @"flodfadeoutmultactors":  @[@"fLODFadeOutMultActors",  @"15.0000"],
+                @"flodfadeoutmultobjects": @[@"fLODFadeOutMultObjects", @"15.0000"],
+                @"flodfadeoutmultitems":   @[@"fLODFadeOutMultItems",   @"15.0000"],
+            };
+            allSettings[@"terrainmanager"] = @{
+                @"ftreeloaddistance":         @[@"fTreeLoadDistance",         @"40000.0000"],
+                @"fblockloaddistancelow":     @[@"fBlockLoadDistanceLow",     @"50000.0000"],
+                @"fblockloaddistance":        @[@"fBlockLoadDistance",        @"125000.0000"],
+                @"fsplitdistancemult":        @[@"fSplitDistanceMult",        @"1.5000"],
+                @"fhighblockloaddistancelow": @[@"fHighBlockLoadDistanceLow", @"20000.0000"],
+            };
+            allSettings[@"grass"] = @{
+                @"b30grassvs":              @[@"b30GrassVS",              @1],
+                @"fgrassstartfadedistance": @[@"fGrassStartFadeDistance", @"7000.0000"],
+            };
         }
-        if (insert < 0) {
-            insert = (NSInteger)lines.count;
-            if (!inside) {
-                [lines addObject:[NSString stringWithFormat:@"[%@]", section]];
-                insert++;
-            }
+
+        // Individual detail settings (either preset defaults or user overrides)
+        displaySettings[@"itexmipmapskip"] = @[@"iTexMipMapSkip", @(opts.textureSize)];
+        displaySettings[@"itexmipmapminimum"] = @[@"iTexMipMapMinimum", @4];
+        displaySettings[@"imaxanisotropy"] = @[@"iMaxAnisotropy", @(opts.anisotropy)];
+        displaySettings[@"fdecallod1"] = @[@"fDecalLOD1", @"500.0000"];
+        displaySettings[@"fdecallod2"] = @[@"fDecalLOD2", @"1000.0000"];
+
+        if (opts.shadowQuality == 0) {
+            displaySettings[@"bdrawshadows"] = @[@"bDrawShadows", @0];
+            displaySettings[@"ishadowfilter"] = @[@"iShadowFilter", @0];
+            displaySettings[@"ishadowmapresolution"] = @[@"iShadowMapResolution", @256];
+            displaySettings[@"iactorshadowcountint"] = @[@"iActorShadowCountInt", @0];
+            displaySettings[@"iactorshadowcountext"] = @[@"iActorShadowCountExt", @0];
+        } else if (opts.shadowQuality == 1) {
+            displaySettings[@"bdrawshadows"] = @[@"bDrawShadows", @1];
+            displaySettings[@"ishadowfilter"] = @[@"iShadowFilter", @1];
+            displaySettings[@"ishadowmapresolution"] = @[@"iShadowMapResolution", @256];
+            displaySettings[@"iactorshadowcountint"] = @[@"iActorShadowCountInt", @4];
+            displaySettings[@"iactorshadowcountext"] = @[@"iActorShadowCountExt", @2];
+        } else if (opts.shadowQuality == 2) {
+            displaySettings[@"bdrawshadows"] = @[@"bDrawShadows", @1];
+            displaySettings[@"ishadowfilter"] = @[@"iShadowFilter", @2];
+            displaySettings[@"ishadowmapresolution"] = @[@"iShadowMapResolution", @512];
+            displaySettings[@"iactorshadowcountint"] = @[@"iActorShadowCountInt", @4];
+            displaySettings[@"iactorshadowcountext"] = @[@"iActorShadowCountExt", @2];
+        } else {
+            displaySettings[@"bdrawshadows"] = @[@"bDrawShadows", @1];
+            displaySettings[@"ishadowfilter"] = @[@"iShadowFilter", @2];
+            displaySettings[@"ishadowmapresolution"] = @[@"iShadowMapResolution", @1024];
+            displaySettings[@"iactorshadowcountint"] = @[@"iActorShadowCountInt", @6];
+            displaySettings[@"iactorshadowcountext"] = @[@"iActorShadowCountExt", @6];
         }
-        for (NSString *key in pending) {
-            NSArray *value = keys[key];
-            [lines insertObject:[NSString stringWithFormat:@"%@=%@", value[0], value[1]] atIndex:(NSUInteger)insert++];
+
+        if (opts.waterQuality == 0) {
+            allSettings[@"water"] = @{
+                @"busewaterrefractions":           @[@"bUseWaterRefractions",           @0],
+                @"busewaterreflections":           @[@"bUseWaterReflections",           @0],
+                @"busewaterreflectionblur":        @[@"bUseWaterReflectionBlur",        @0],
+                @"busewaterdisplacements":         @[@"bUseWaterDisplacements",         @0],
+                @"busewaterdepth":                 @[@"bUseWaterDepth",                 @0],
+                @"iwaterreflectwidth":             @[@"iWaterReflectWidth",             @256],
+                @"iwaterreflectheight":            @[@"iWaterReflectHeight",            @256],
+                @"iwaterbluramount":               @[@"iWaterBlurAmount",               @0],
+                @"bautowatersilhouettereflections":@[@"bAutoWaterSilhouetteReflections",@1],
+                @"bforcehighdetailreflections":    @[@"bForceHighDetailReflections",    @0],
+            };
+        } else if (opts.waterQuality == 1) {
+            allSettings[@"water"] = @{
+                @"busewaterrefractions":           @[@"bUseWaterRefractions",           @1],
+                @"busewaterreflections":           @[@"bUseWaterReflections",           @1],
+                @"busewaterreflectionblur":        @[@"bUseWaterReflectionBlur",        @0],
+                @"busewaterdisplacements":         @[@"bUseWaterDisplacements",         @1],
+                @"busewaterdepth":                 @[@"bUseWaterDepth",                 @1],
+                @"iwaterreflectwidth":             @[@"iWaterReflectWidth",             @512],
+                @"iwaterreflectheight":            @[@"iWaterReflectHeight",            @512],
+                @"iwaterbluramount":               @[@"iWaterBlurAmount",               @0],
+                @"bautowatersilhouettereflections":@[@"bAutoWaterSilhouetteReflections",@1],
+                @"bforcehighdetailreflections":    @[@"bForceHighDetailReflections",    @0],
+            };
+        } else if (opts.waterQuality == 2) {
+            allSettings[@"water"] = @{
+                @"busewaterrefractions":           @[@"bUseWaterRefractions",           @1],
+                @"busewaterreflections":           @[@"bUseWaterReflections",           @1],
+                @"busewaterreflectionblur":        @[@"bUseWaterReflectionBlur",        @1],
+                @"busewaterdisplacements":         @[@"bUseWaterDisplacements",         @1],
+                @"busewaterdepth":                 @[@"bUseWaterDepth",                 @1],
+                @"iwaterreflectwidth":             @[@"iWaterReflectWidth",             @512],
+                @"iwaterreflectheight":            @[@"iWaterReflectHeight",            @512],
+                @"iwaterbluramount":               @[@"iWaterBlurAmount",               @2],
+                @"bautowatersilhouettereflections":@[@"bAutoWaterSilhouetteReflections",@1],
+                @"bforcehighdetailreflections":    @[@"bForceHighDetailReflections",    @0],
+            };
+        } else {
+            allSettings[@"water"] = @{
+                @"busewaterrefractions":           @[@"bUseWaterRefractions",           @1],
+                @"busewaterreflections":           @[@"bUseWaterReflections",           @1],
+                @"busewaterreflectionblur":        @[@"bUseWaterReflectionBlur",        @1],
+                @"busewaterdisplacements":         @[@"bUseWaterDisplacements",         @1],
+                @"busewaterdepth":                 @[@"bUseWaterDepth",                 @1],
+                @"iwaterreflectwidth":             @[@"iWaterReflectWidth",             @1024],
+                @"iwaterreflectheight":            @[@"iWaterReflectHeight",            @1024],
+                @"iwaterbluramount":               @[@"iWaterBlurAmount",               @4],
+                @"bautowatersilhouettereflections":@[@"bAutoWaterSilhouetteReflections",@0],
+                @"bforcehighdetailreflections":    @[@"bForceHighDetailReflections",    @1],
+            };
         }
+
+        allSettings[@"blurshaderhdr"] = @{
+            @"bdohighdynamicrange": @[@"bDoHighDynamicRange", (opts.screenEffects >= 2) ? @1 : @0],
+        };
+        allSettings[@"blurshader"] = @{
+            @"buseblurshader": @[@"bUseBlurShader", (opts.screenEffects == 1) ? @1 : @0],
+        };
+        allSettings[@"imagespace"] = @{
+            @"bdodepthoffield":  @[@"bDoDepthOfField",  (opts.screenEffects == 3) ? @1 : @0],
+            @"iradialblurlevel": @[@"iRadialBlurLevel", (opts.preset >= 4) ? @2 : ((opts.preset == 3) ? @1 : @0)],
+        };
     }
+
+    applyIniSettings(lines, allSettings);
+
     // Without Fallout3Launcher.exe, Fallout3.exe initializes missing INIPrefSetting LOD
     // multipliers to 0.0000. Dividing by fLODFadeOutMultActors=0 produces +inf in the
     // actor fade check (0xad2960), culling every NPC and starving Actor::Update/dialogue.
@@ -677,29 +1294,26 @@ static NSString *exeHash(NSURL *url) {
     [fm createDirectoryAtPath:prefs.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:NULL];
     NSError *prefsError = nil;
     BOOL prefsOK = [[lines componentsJoinedByString:@"\n"] writeToFile:prefs atomically:YES encoding:NSISOLatin1StringEncoding error:&prefsError];
-    fprintf(stderr, "[display] native %ux%u; user=%s; preferences=%s\n",
-            fnv_display_width(), fnv_display_height(), userDir.fileSystemRepresentation,
+    fprintf(stderr, "[display] native %ux%u; preset=%d tex=%d aniso=%d shadow=%d water=%d fx=%d mouse_accel=%d; user=%s; preferences=%s\n",
+            fnv_display_width(), fnv_display_height(), opts.preset, opts.textureSize, opts.anisotropy,
+            opts.shadowQuality, opts.waterQuality, opts.screenEffects, opts.disableMouseAccel ? 0 : 1,
+            userDir.fileSystemRepresentation,
             prefsOK ? "written" : prefsError.localizedDescription.UTF8String);
 
     fnv_audio_start();
-#endif
 
     [self setCursorCapture:YES];
 
+    NSURL *errLogURL = self.logURL;
     NSThread *thread = [[NSThread alloc] initWithBlock:^{
         @autoreleasepool {
             fnv_wait_active();
-#ifdef FNV_PROBE
-            extern int fnv_probe(unsigned);
-            int rc = fnv_probe(0);
-#else
             extern int fnv_run_game(int, char **);
             char *argv[] = {GAME_ARGV0, GAME_EXE_C, NULL};
             int rc = fnv_run_game(2, argv);
-#endif
             __block NSString *failureDetail = nil;
             if (rc) {
-                NSString *diagnostic = [NSString stringWithContentsOfURL:logURL encoding:NSUTF8StringEncoding error:NULL];
+                NSString *diagnostic = [NSString stringWithContentsOfURL:errLogURL encoding:NSUTF8StringEncoding error:NULL];
                 [diagnostic enumerateLinesUsingBlock:^(NSString *line, BOOL *stop) {
                     if ([line hasPrefix:@"[host] TRAP"]) { failureDetail = line; *stop = YES; }
                 }];
@@ -709,7 +1323,7 @@ static NSString *exeHash(NSURL *url) {
                 if (rc == 0) {
                     [NSApp terminate:nil];
                 } else {
-                    [self showStatus:failureDetail ?: [NSString stringWithFormat:@"Host returned %d. See %@.", rc, logURL.path]];
+                    [self showStatus:failureDetail ?: [NSString stringWithFormat:@"Host returned %d. See %@.", rc, errLogURL.path]];
                 }
             });
         }
@@ -717,9 +1331,20 @@ static NSString *exeHash(NSURL *url) {
     thread.stackSize = 16 * 1024 * 1024;
     [thread start];
 }
+#endif
+
+- (void)windowWillClose:(NSNotification *)notification {
+#ifndef FNV_PROBE
+    if (notification.object == self.optionsWindow && !self.gameLaunched) {
+        [NSApp terminate:nil];
+    }
+#else
+    (void)notification;
+#endif
+}
 
 - (void)windowDidBecomeKey:(NSNotification *)notification {
-    (void)notification;
+    if (notification.object != self.window) return;
     [self setCursorCapture:YES];
 #ifndef FNV_PROBE
     fnv_media_active(1);
@@ -728,7 +1353,7 @@ static NSString *exeHash(NSURL *url) {
 }
 
 - (void)windowDidResignKey:(NSNotification *)notification {
-    (void)notification;
+    if (notification.object != self.window) return;
     [self setCursorCapture:NO];
     [self releaseAllInputs];
 }
@@ -770,8 +1395,12 @@ static NSString *exeHash(NSURL *url) {
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
     @autoreleasepool {
+        [NSUserDefaults.standardUserDefaults setBool:YES forKey:@"ApplePersistenceIgnoreState"];
         [NSApplication sharedApplication];
-        [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+        const char *headless = getenv("FNV_HEADLESS");
+        [NSApp setActivationPolicy:(headless && headless[0] && headless[0] != '0')
+            ? NSApplicationActivationPolicyProhibited
+            : NSApplicationActivationPolicyRegular];
         AppDelegate *delegate = [AppDelegate new];
         NSApp.delegate = delegate;
         [NSApp run];
