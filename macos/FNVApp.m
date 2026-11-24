@@ -238,10 +238,41 @@ typedef struct {
     int shadowQuality;   // 0=Off, 1=Medium (256), 2=High (512), 3=Ultra (1024)
     int waterQuality;    // 0=Low, 1=Medium, 2=High (512), 3=Ultra (1024)
     int screenEffects;   // 0=Off, 1=Bloom, 2=HDR, 3=HDR + Depth of Field
+    int fovPreset;       // 0=Keep FALLOUT.INI, 1=Original, 2=Expanded, 3=Wide, 4=Custom
+    int worldFov;        // 75..105 (fDefaultWorldFOV)
+    int firstPersonFov;  // 55..75  (fDefault1stPersonFOV)
     BOOL fullscreen;
     BOOL disableMouseAccel;
     BOOL skipLauncher;
 } FalloutOptions;
+
+static int clampInt(int v, int lo, int hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+static void applyFovPresetDefaults(FalloutOptions *opts, int fovPreset) {
+    switch (fovPreset) {
+    case 2: // Expanded
+        opts->worldFov = 90; opts->firstPersonFov = 60;
+        break;
+    case 3: // Wide
+        opts->worldFov = 100; opts->firstPersonFov = 65;
+        break;
+    case 1: // Original
+    default:
+        opts->worldFov = 75; opts->firstPersonFov = 55;
+        break;
+    }
+}
+
+static int matchingFovPreset(int worldFov, int firstPersonFov) {
+    if (worldFov == 75 && firstPersonFov == 55) return 1;
+    if (worldFov == 90 && firstPersonFov == 60) return 2;
+    if (worldFov == 100 && firstPersonFov == 65) return 3;
+    return 4;
+}
 
 static void applyPresetDefaults(FalloutOptions *opts, int preset) {
     switch (preset) {
@@ -293,6 +324,19 @@ static FalloutOptions loadOptions(void) {
     if (wObj) { opts.waterQuality = (int)[wObj integerValue]; if (opts.waterQuality < 0 || opts.waterQuality > 3) opts.waterQuality = 3; }
     id eObj = [ud objectForKey:prefKey(@"ScreenEffects")];
     if (eObj) { opts.screenEffects = (int)[eObj integerValue]; if (opts.screenEffects < 0 || opts.screenEffects > 3) opts.screenEffects = 3; }
+    id fpObj = [ud objectForKey:prefKey(@"FovPreset")];
+    opts.fovPreset = fpObj ? (int)[fpObj integerValue] : 1; // Original default
+    if (opts.fovPreset < 0 || opts.fovPreset > 4) opts.fovPreset = 1;
+    applyFovPresetDefaults(&opts, (opts.fovPreset >= 1 && opts.fovPreset <= 3) ? opts.fovPreset : 1);
+    id wfObj = [ud objectForKey:prefKey(@"WorldFov")];
+    if (wfObj) opts.worldFov = clampInt((int)[wfObj integerValue], 75, 105);
+    id fpfObj = [ud objectForKey:prefKey(@"FirstPersonFov")];
+    if (fpfObj) opts.firstPersonFov = clampInt((int)[fpfObj integerValue], 55, 75);
+    if (opts.fovPreset >= 1 && opts.fovPreset <= 3) {
+        applyFovPresetDefaults(&opts, opts.fovPreset);
+    } else if (opts.fovPreset == 4) {
+        opts.fovPreset = matchingFovPreset(opts.worldFov, opts.firstPersonFov);
+    }
     id fsObj = [ud objectForKey:prefKey(@"Fullscreen")];
     opts.fullscreen = fsObj ? [fsObj boolValue] : YES;
     id maObj = [ud objectForKey:prefKey(@"DisableMouseAccel")];
@@ -324,6 +368,16 @@ static FalloutOptions loadOptions(void) {
         else if (!strcasecmp(envAA, "smaa") || !strcmp(envAA, "1")) opts.antiAliasing = 1;
         else if (!strcasecmp(envAA, "fxaa") || !strcmp(envAA, "2")) opts.antiAliasing = 2;
     }
+    const char *envFov = getenv("FNV_FOV");
+    if (envFov && envFov[0]) {
+        opts.worldFov = clampInt((int)strtol(envFov, NULL, 10), 75, 105);
+        opts.fovPreset = matchingFovPreset(opts.worldFov, opts.firstPersonFov);
+    }
+    const char *envFpFov = getenv("FNV_1ST_PERSON_FOV");
+    if (envFpFov && envFpFov[0]) {
+        opts.firstPersonFov = clampInt((int)strtol(envFpFov, NULL, 10), 55, 75);
+        opts.fovPreset = matchingFovPreset(opts.worldFov, opts.firstPersonFov);
+    }
     const char *envMA = getenv("FNV_MOUSE_ACCEL");
     if (envMA && envMA[0]) opts.disableMouseAccel = (atoi(envMA) == 0);
     if (getenv("FNV_WINDOWED")) opts.fullscreen = NO;
@@ -341,6 +395,9 @@ static void saveOptions(FalloutOptions opts) {
     [ud setInteger:opts.shadowQuality forKey:prefKey(@"ShadowQuality")];
     [ud setInteger:opts.waterQuality forKey:prefKey(@"WaterQuality")];
     [ud setInteger:opts.screenEffects forKey:prefKey(@"ScreenEffects")];
+    [ud setInteger:opts.fovPreset forKey:prefKey(@"FovPreset")];
+    [ud setInteger:opts.worldFov forKey:prefKey(@"WorldFov")];
+    [ud setInteger:opts.firstPersonFov forKey:prefKey(@"FirstPersonFov")];
     [ud setBool:opts.fullscreen forKey:prefKey(@"Fullscreen")];
     [ud setBool:opts.disableMouseAccel forKey:prefKey(@"DisableMouseAccel")];
     [ud setBool:opts.skipLauncher forKey:prefKey(@"SkipLauncher")];
@@ -425,6 +482,12 @@ static NSString *exeHash(NSURL *url) {
 @property (nonatomic, strong) NSPopUpButton *waterPopup;
 @property (nonatomic, strong) NSPopUpButton *effectsPopup;
 @property (nonatomic, strong) NSPopUpButton *displayPopup;
+@property (nonatomic, strong) NSPopUpButton *fovPresetPopup;
+@property (nonatomic, strong) NSSlider *worldFovSlider;
+@property (nonatomic, strong) NSSlider *firstPersonFovSlider;
+@property (nonatomic, strong) NSTextField *worldFovValueLabel;
+@property (nonatomic, strong) NSTextField *firstPersonFovValueLabel;
+@property (nonatomic, strong) NSTextField *fovTipLabel;
 @property (nonatomic, strong) NSButton *mouseAccelCheck;
 @property (nonatomic, strong) NSButton *skipLauncherCheck;
 @property (nonatomic) unsigned nativeW;
@@ -648,6 +711,48 @@ static NSString *exeHash(NSURL *url) {
 - (void)scaleChanged:(id)sender { (void)sender; [self updateResolutionPreview]; }
 - (void)upscalerChanged:(id)sender { (void)sender; [self updateResolutionPreview]; }
 
+- (void)updateFovUI {
+    int fp = (int)self.fovPresetPopup.selectedItem.tag;
+    int wf = clampInt((int)llround(self.worldFovSlider.doubleValue), 75, 105);
+    int fpf = clampInt((int)llround(self.firstPersonFovSlider.doubleValue), 55, 75);
+    BOOL enable = (fp != 0);
+    self.worldFovSlider.enabled = enable;
+    self.firstPersonFovSlider.enabled = enable;
+    self.worldFovValueLabel.stringValue = [NSString stringWithFormat:@"%d°", wf];
+    self.firstPersonFovValueLabel.stringValue = [NSString stringWithFormat:@"%d°", fpf];
+    self.worldFovValueLabel.textColor = enable ? NSColor.labelColor : NSColor.tertiaryLabelColor;
+    self.firstPersonFovValueLabel.textColor = enable ? NSColor.labelColor : NSColor.tertiaryLabelColor;
+    if (!enable) {
+        self.fovTipLabel.stringValue = @"Keeping existing FOV settings in FALLOUT.INI.";
+    } else if (fpf > 65) {
+        self.fovTipLabel.stringValue = @"Pip-Boy stays 75°. >65° 1st-person may clip arms or iron sights.";
+    } else {
+        self.fovTipLabel.stringValue = @"Pip-Boy & terminals stay at 75° (untouched).";
+    }
+}
+
+- (void)fovPresetChanged:(id)sender {
+    (void)sender;
+    int fp = (int)self.fovPresetPopup.selectedItem.tag;
+    if (fp >= 1 && fp <= 3) {
+        FalloutOptions tmp = {0};
+        applyFovPresetDefaults(&tmp, fp);
+        self.worldFovSlider.integerValue = tmp.worldFov;
+        self.firstPersonFovSlider.integerValue = tmp.firstPersonFov;
+    }
+    [self updateFovUI];
+}
+
+- (void)fovSliderChanged:(id)sender {
+    (void)sender;
+    int wf = clampInt((int)llround(self.worldFovSlider.doubleValue), 75, 105);
+    int fpf = clampInt((int)llround(self.firstPersonFovSlider.doubleValue), 55, 75);
+    self.worldFovSlider.integerValue = wf;
+    self.firstPersonFovSlider.integerValue = fpf;
+    [self.fovPresetPopup selectItemWithTag:matchingFovPreset(wf, fpf)];
+    [self updateFovUI];
+}
+
 - (void)quitClicked:(id)sender {
     (void)sender;
     [NSApp terminate:nil];
@@ -665,6 +770,9 @@ static NSString *exeHash(NSURL *url) {
     opts.shadowQuality = (int)self.shadowPopup.selectedItem.tag;
     opts.waterQuality = (int)self.waterPopup.selectedItem.tag;
     opts.screenEffects = (int)self.effectsPopup.selectedItem.tag;
+    opts.fovPreset = (int)self.fovPresetPopup.selectedItem.tag;
+    opts.worldFov = clampInt((int)llround(self.worldFovSlider.doubleValue), 75, 105);
+    opts.firstPersonFov = clampInt((int)llround(self.firstPersonFovSlider.doubleValue), 55, 75);
     opts.fullscreen = (self.displayPopup.selectedItem.tag != 0);
     opts.disableMouseAccel = (self.mouseAccelCheck.state == NSControlStateValueOn);
     opts.skipLauncher = (self.skipLauncherCheck.state == NSControlStateValueOn);
@@ -685,6 +793,16 @@ static NSString *exeHash(NSURL *url) {
         else if (!strcasecmp(envAA, "smaa") || !strcmp(envAA, "1")) opts.antiAliasing = 1;
         else if (!strcasecmp(envAA, "fxaa") || !strcmp(envAA, "2")) opts.antiAliasing = 2;
     }
+    const char *envFov = getenv("FNV_FOV");
+    if (envFov && envFov[0]) {
+        opts.worldFov = clampInt((int)strtol(envFov, NULL, 10), 75, 105);
+        opts.fovPreset = matchingFovPreset(opts.worldFov, opts.firstPersonFov);
+    }
+    const char *envFpFov = getenv("FNV_1ST_PERSON_FOV");
+    if (envFpFov && envFpFov[0]) {
+        opts.firstPersonFov = clampInt((int)strtol(envFpFov, NULL, 10), 55, 75);
+        opts.fovPreset = matchingFovPreset(opts.worldFov, opts.firstPersonFov);
+    }
     if (getenv("FNV_WINDOWED")) opts.fullscreen = NO;
     const char *envMA = getenv("FNV_MOUSE_ACCEL");
     if (envMA && envMA[0]) opts.disableMouseAccel = (atoi(envMA) == 0);
@@ -692,7 +810,7 @@ static NSString *exeHash(NSURL *url) {
 }
 
 - (void)showOptionsWindow:(FalloutOptions)opts {
-    NSRect rect = NSMakeRect(0, 0, 480, 586);
+    NSRect rect = NSMakeRect(0, 0, 480, 653);
     self.optionsWindow = [[NSWindow alloc] initWithContentRect:rect
                                                      styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
                                                        backing:NSBackingStoreBuffered
@@ -704,7 +822,7 @@ static NSString *exeHash(NSURL *url) {
 
     NSTextField *title = [NSTextField labelWithString:@"Graphics & Input Options"];
     title.font = [NSFont boldSystemFontOfSize:15];
-    title.frame = NSMakeRect(24, 550, 432, 22);
+    title.frame = NSMakeRect(24, 617, 432, 22);
     [cv addSubview:title];
 
     NSString *dispStr = (self.backingW != self.nativeW || self.backingH != self.nativeH)
@@ -715,10 +833,10 @@ static NSString *exeHash(NSURL *url) {
     NSTextField *sub = [NSTextField labelWithString:dispStr];
     sub.font = [NSFont systemFontOfSize:12];
     sub.textColor = NSColor.secondaryLabelColor;
-    sub.frame = NSMakeRect(24, 530, 432, 16);
+    sub.frame = NSMakeRect(24, 597, 432, 16);
     [cv addSubview:sub];
 
-    NSBox *sep1 = [[NSBox alloc] initWithFrame:NSMakeRect(24, 518, 432, 1)];
+    NSBox *sep1 = [[NSBox alloc] initWithFrame:NSMakeRect(24, 588, 432, 1)];
     sep1.boxType = NSBoxSeparator;
     [cv addSubview:sep1];
 
@@ -735,8 +853,8 @@ static NSString *exeHash(NSURL *url) {
         return p;
     };
 
-    mkLabel(@"Quality Preset:", 480);
-    self.presetPopup = mkPopup(478);
+    mkLabel(@"Quality Preset:", 554);
+    self.presetPopup = mkPopup(552);
     [self.presetPopup addItemWithTitle:@"Ultra (Recommended)"]; self.presetPopup.lastItem.tag = 4;
     [self.presetPopup addItemWithTitle:@"High"]; self.presetPopup.lastItem.tag = 3;
     [self.presetPopup addItemWithTitle:@"Medium"]; self.presetPopup.lastItem.tag = 2;
@@ -746,8 +864,8 @@ static NSString *exeHash(NSURL *url) {
     self.presetPopup.target = self;
     self.presetPopup.action = @selector(presetChanged:);
 
-    mkLabel(@"Render Scale:", 446);
-    self.scalePopup = mkPopup(444);
+    mkLabel(@"Render Scale:", 523);
+    self.scalePopup = mkPopup(521);
     [self.scalePopup addItemWithTitle:@"100% (Native)"]; self.scalePopup.lastItem.tag = 100;
     [self.scalePopup addItemWithTitle:@"85% (Ultra Quality)"]; self.scalePopup.lastItem.tag = 85;
     [self.scalePopup addItemWithTitle:@"75% (Quality)"]; self.scalePopup.lastItem.tag = 75;
@@ -760,33 +878,33 @@ static NSString *exeHash(NSURL *url) {
     self.resPreviewLabel = [NSTextField labelWithString:@""];
     self.resPreviewLabel.font = [NSFont systemFontOfSize:11];
     self.resPreviewLabel.textColor = NSColor.secondaryLabelColor;
-    self.resPreviewLabel.frame = NSMakeRect(198, 424, 258, 15);
+    self.resPreviewLabel.frame = NSMakeRect(198, 502, 258, 15);
     [cv addSubview:self.resPreviewLabel];
 
-    mkLabel(@"Upscaler:", 392);
-    self.upscalerPopup = mkPopup(390);
+    mkLabel(@"Upscaler:", 474);
+    self.upscalerPopup = mkPopup(472);
     [self.upscalerPopup addItemWithTitle:@"MetalFX Spatial"]; self.upscalerPopup.lastItem.tag = 1;
     [self.upscalerPopup addItemWithTitle:@"Bilinear"]; self.upscalerPopup.lastItem.tag = 0;
     [self.upscalerPopup selectItemWithTag:opts.upscaler];
     self.upscalerPopup.target = self;
     self.upscalerPopup.action = @selector(upscalerChanged:);
 
-    mkLabel(@"Anti-Aliasing:", 358);
-    self.aaPopup = mkPopup(356);
+    mkLabel(@"Anti-Aliasing:", 443);
+    self.aaPopup = mkPopup(441);
     [self.aaPopup addItemWithTitle:@"Off"]; self.aaPopup.lastItem.tag = 0;
     [self.aaPopup addItemWithTitle:@"SMAA 1x (Post-Process)"]; self.aaPopup.lastItem.tag = 1;
     [self.aaPopup addItemWithTitle:@"FXAA (Post-Process)"]; self.aaPopup.lastItem.tag = 2;
     [self.aaPopup selectItemWithTag:opts.antiAliasing];
 
-    mkLabel(@"Texture Size:", 324);
-    self.texturePopup = mkPopup(322);
+    mkLabel(@"Texture Size:", 412);
+    self.texturePopup = mkPopup(410);
     [self.texturePopup addItemWithTitle:@"Large (High)"]; self.texturePopup.lastItem.tag = 0;
     [self.texturePopup addItemWithTitle:@"Medium"]; self.texturePopup.lastItem.tag = 1;
     [self.texturePopup addItemWithTitle:@"Small (Low)"]; self.texturePopup.lastItem.tag = 2;
     [self.texturePopup selectItemWithTag:opts.textureSize];
 
-    mkLabel(@"Anisotropic Filtering:", 290);
-    self.anisoPopup = mkPopup(288);
+    mkLabel(@"Anisotropic Filtering:", 381);
+    self.anisoPopup = mkPopup(379);
     [self.anisoPopup addItemWithTitle:@"15x (Max)"]; self.anisoPopup.lastItem.tag = 15;
     [self.anisoPopup addItemWithTitle:@"8x"]; self.anisoPopup.lastItem.tag = 8;
     [self.anisoPopup addItemWithTitle:@"4x"]; self.anisoPopup.lastItem.tag = 4;
@@ -794,69 +912,117 @@ static NSString *exeHash(NSURL *url) {
     [self.anisoPopup addItemWithTitle:@"Off"]; self.anisoPopup.lastItem.tag = 0;
     if (![self.anisoPopup selectItemWithTag:opts.anisotropy]) [self.anisoPopup selectItemWithTag:15];
 
-    mkLabel(@"Shadow Quality:", 256);
-    self.shadowPopup = mkPopup(254);
+    mkLabel(@"Shadow Quality:", 350);
+    self.shadowPopup = mkPopup(348);
     [self.shadowPopup addItemWithTitle:@"Ultra (1024)"]; self.shadowPopup.lastItem.tag = 3;
     [self.shadowPopup addItemWithTitle:@"High (512)"]; self.shadowPopup.lastItem.tag = 2;
     [self.shadowPopup addItemWithTitle:@"Medium (256)"]; self.shadowPopup.lastItem.tag = 1;
     [self.shadowPopup addItemWithTitle:@"Off"]; self.shadowPopup.lastItem.tag = 0;
     [self.shadowPopup selectItemWithTag:opts.shadowQuality];
 
-    mkLabel(@"Water Detail:", 222);
-    self.waterPopup = mkPopup(220);
+    mkLabel(@"Water Detail:", 319);
+    self.waterPopup = mkPopup(317);
     [self.waterPopup addItemWithTitle:@"Ultra (1024 Reflections)"]; self.waterPopup.lastItem.tag = 3;
     [self.waterPopup addItemWithTitle:@"High (512 Reflections)"]; self.waterPopup.lastItem.tag = 2;
     [self.waterPopup addItemWithTitle:@"Medium (512 Reflections)"]; self.waterPopup.lastItem.tag = 1;
     [self.waterPopup addItemWithTitle:@"Low (Off)"]; self.waterPopup.lastItem.tag = 0;
     [self.waterPopup selectItemWithTag:opts.waterQuality];
 
-    mkLabel(@"Screen Effects:", 188);
-    self.effectsPopup = mkPopup(186);
+    mkLabel(@"Screen Effects:", 288);
+    self.effectsPopup = mkPopup(286);
     [self.effectsPopup addItemWithTitle:@"HDR + Depth of Field"]; self.effectsPopup.lastItem.tag = 3;
     [self.effectsPopup addItemWithTitle:@"HDR Only"]; self.effectsPopup.lastItem.tag = 2;
     [self.effectsPopup addItemWithTitle:@"Bloom"]; self.effectsPopup.lastItem.tag = 1;
     [self.effectsPopup addItemWithTitle:@"Off"]; self.effectsPopup.lastItem.tag = 0;
     [self.effectsPopup selectItemWithTag:opts.screenEffects];
 
-    mkLabel(@"Display Mode:", 154);
-    self.displayPopup = mkPopup(152);
+    mkLabel(@"Display Mode:", 257);
+    self.displayPopup = mkPopup(255);
     [self.displayPopup addItemWithTitle:@"Fullscreen"]; self.displayPopup.lastItem.tag = 1;
     [self.displayPopup addItemWithTitle:@"Windowed"]; self.displayPopup.lastItem.tag = 0;
     [self.displayPopup selectItemWithTag:opts.fullscreen ? 1 : 0];
 
+    mkLabel(@"FOV Preset:", 226);
+    self.fovPresetPopup = mkPopup(224);
+    [self.fovPresetPopup addItemWithTitle:@"Original (75° / 55°)"]; self.fovPresetPopup.lastItem.tag = 1;
+    [self.fovPresetPopup addItemWithTitle:@"Expanded (90° / 60°)"]; self.fovPresetPopup.lastItem.tag = 2;
+    [self.fovPresetPopup addItemWithTitle:@"Wide (100° / 65°)"]; self.fovPresetPopup.lastItem.tag = 3;
+    [self.fovPresetPopup addItemWithTitle:@"Custom"]; self.fovPresetPopup.lastItem.tag = 4;
+    [self.fovPresetPopup addItemWithTitle:@"Keep FALLOUT.INI"]; self.fovPresetPopup.lastItem.tag = 0;
+    [self.fovPresetPopup selectItemWithTag:opts.fovPreset];
+    self.fovPresetPopup.target = self;
+    self.fovPresetPopup.action = @selector(fovPresetChanged:);
+
+    mkLabel(@"World FOV:", 197);
+    self.worldFovSlider = [NSSlider sliderWithValue:opts.worldFov minValue:75 maxValue:105 target:self action:@selector(fovSliderChanged:)];
+    self.worldFovSlider.frame = NSMakeRect(196, 194, 214, 24);
+    self.worldFovSlider.numberOfTickMarks = 7;
+    self.worldFovSlider.allowsTickMarkValuesOnly = NO;
+    self.worldFovSlider.continuous = YES;
+    [cv addSubview:self.worldFovSlider];
+
+    self.worldFovValueLabel = [NSTextField labelWithString:@""];
+    self.worldFovValueLabel.font = [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightRegular];
+    self.worldFovValueLabel.alignment = NSTextAlignmentRight;
+    self.worldFovValueLabel.frame = NSMakeRect(414, 197, 42, 20);
+    [cv addSubview:self.worldFovValueLabel];
+
+    mkLabel(@"1st-Person FOV:", 169);
+    self.firstPersonFovSlider = [NSSlider sliderWithValue:opts.firstPersonFov minValue:55 maxValue:75 target:self action:@selector(fovSliderChanged:)];
+    self.firstPersonFovSlider.frame = NSMakeRect(196, 166, 214, 24);
+    self.firstPersonFovSlider.numberOfTickMarks = 5;
+    self.firstPersonFovSlider.allowsTickMarkValuesOnly = NO;
+    self.firstPersonFovSlider.continuous = YES;
+    [cv addSubview:self.firstPersonFovSlider];
+
+    self.firstPersonFovValueLabel = [NSTextField labelWithString:@""];
+    self.firstPersonFovValueLabel.font = [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightRegular];
+    self.firstPersonFovValueLabel.alignment = NSTextAlignmentRight;
+    self.firstPersonFovValueLabel.frame = NSMakeRect(414, 169, 42, 20);
+    [cv addSubview:self.firstPersonFovValueLabel];
+
+    self.fovTipLabel = [NSTextField labelWithString:@""];
+    self.fovTipLabel.font = [NSFont systemFontOfSize:11];
+    self.fovTipLabel.textColor = NSColor.secondaryLabelColor;
+    self.fovTipLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    self.fovTipLabel.maximumNumberOfLines = 2;
+    self.fovTipLabel.frame = NSMakeRect(198, 136, 258, 26);
+    [cv addSubview:self.fovTipLabel];
+
     self.mouseAccelCheck = [NSButton checkboxWithTitle:@"Disable in-game mouse acceleration (menus & camera)"
                                                 target:nil action:nil];
-    self.mouseAccelCheck.frame = NSMakeRect(24, 120, 432, 18);
+    self.mouseAccelCheck.frame = NSMakeRect(24, 110, 432, 18);
     self.mouseAccelCheck.state = opts.disableMouseAccel ? NSControlStateValueOn : NSControlStateValueOff;
     [cv addSubview:self.mouseAccelCheck];
 
     NSTextField *mouseTip = [NSTextField labelWithString:@"Tip: for external mice, also disable Pointer Acceleration in System Settings → Mouse."];
     mouseTip.font = [NSFont systemFontOfSize:11];
     mouseTip.textColor = NSColor.secondaryLabelColor;
-    mouseTip.frame = NSMakeRect(42, 100, 414, 15);
+    mouseTip.frame = NSMakeRect(42, 92, 414, 15);
     [cv addSubview:mouseTip];
 
     self.skipLauncherCheck = [NSButton checkboxWithTitle:@"Skip this window on next launch (hold Option ⌥ to reopen)"
                                                   target:nil action:nil];
-    self.skipLauncherCheck.frame = NSMakeRect(24, 74, 432, 18);
+    self.skipLauncherCheck.frame = NSMakeRect(24, 68, 432, 18);
     self.skipLauncherCheck.state = opts.skipLauncher ? NSControlStateValueOn : NSControlStateValueOff;
     [cv addSubview:self.skipLauncherCheck];
 
-    NSBox *sep2 = [[NSBox alloc] initWithFrame:NSMakeRect(24, 58, 432, 1)];
+    NSBox *sep2 = [[NSBox alloc] initWithFrame:NSMakeRect(24, 56, 432, 1)];
     sep2.boxType = NSBoxSeparator;
     [cv addSubview:sep2];
 
     NSButton *quitBtn = [NSButton buttonWithTitle:@"Quit" target:self action:@selector(quitClicked:)];
-    quitBtn.frame = NSMakeRect(276, 18, 88, 30);
+    quitBtn.frame = NSMakeRect(276, 16, 88, 30);
     [cv addSubview:quitBtn];
 
     NSButton *playBtn = [NSButton buttonWithTitle:@"Play" target:self action:@selector(playClicked:)];
-    playBtn.frame = NSMakeRect(372, 18, 84, 30);
+    playBtn.frame = NSMakeRect(372, 16, 84, 30);
     playBtn.keyEquivalent = @"\r";
     [cv addSubview:playBtn];
 
     [self updateResolutionPreview];
     [self updateDetailControlsEnabled];
+    [self updateFovUI];
     [self.optionsWindow center];
     [self.optionsWindow makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
@@ -1130,24 +1296,27 @@ static NSString *exeHash(NSURL *url) {
     if ([fm fileExistsAtPath:mainIni]) {
         NSString *iniText = [NSString stringWithContentsOfFile:mainIni encoding:NSISOLatin1StringEncoding error:NULL] ?: @"";
         NSMutableArray<NSString *> *iniLines = [[iniText componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet] mutableCopy];
-        NSDictionary *mouseSettings = opts.disableMouseAccel
+        NSMutableDictionary *iniSettings = [NSMutableDictionary dictionary];
+        iniSettings[@"controls"] = opts.disableMouseAccel
             ? @{
-                @"controls": @{
-                    @"fforegroundmouseaccelbase": @[@"fForegroundMouseAccelBase", @"0"],
-                    @"fforegroundmouseacceltop":  @[@"fForegroundMouseAccelTop",  @"0"],
-                    @"fforegroundmousebase":      @[@"fForegroundMouseBase",      @"0"],
-                    @"fforegroundmousemult":      @[@"fForegroundMouseMult",      @"0"],
-                },
+                @"fforegroundmouseaccelbase": @[@"fForegroundMouseAccelBase", @"0"],
+                @"fforegroundmouseacceltop":  @[@"fForegroundMouseAccelTop",  @"0"],
+                @"fforegroundmousebase":      @[@"fForegroundMouseBase",      @"0"],
+                @"fforegroundmousemult":      @[@"fForegroundMouseMult",      @"0"],
             }
             : @{
-                @"controls": @{
-                    @"fforegroundmouseaccelbase": @[@"fForegroundMouseAccelBase", @"0.005"],
-                    @"fforegroundmouseacceltop":  @[@"fForegroundMouseAccelTop",  @"0.025"],
-                    @"fforegroundmousebase":      @[@"fForegroundMouseBase",      @"0"],
-                    @"fforegroundmousemult":      @[@"fForegroundMouseMult",      @"4"],
-                },
+                @"fforegroundmouseaccelbase": @[@"fForegroundMouseAccelBase", @"0.005"],
+                @"fforegroundmouseacceltop":  @[@"fForegroundMouseAccelTop",  @"0.025"],
+                @"fforegroundmousebase":      @[@"fForegroundMouseBase",      @"0"],
+                @"fforegroundmousemult":      @[@"fForegroundMouseMult",      @"4"],
             };
-        applyIniSettings(iniLines, mouseSettings);
+        if (opts.fovPreset != 0) {
+            iniSettings[@"display"] = @{
+                @"fdefaultworldfov":     @[@"fDefaultWorldFOV",     [NSString stringWithFormat:@"%.4f", (double)opts.worldFov]],
+                @"fdefault1stpersonfov": @[@"fDefault1stPersonFOV", [NSString stringWithFormat:@"%.4f", (double)opts.firstPersonFov]],
+            };
+        }
+        applyIniSettings(iniLines, iniSettings);
         [[iniLines componentsJoinedByString:@"\n"] writeToFile:mainIni atomically:YES encoding:NSISOLatin1StringEncoding error:NULL];
     }
 
@@ -1174,6 +1343,10 @@ static NSString *exeHash(NSURL *url) {
         @"iwatermultisamples": @[@"iWaterMultisamples", @0],
         @"btransparencymultisampling": @[@"bTransparencyMultisampling", @0],
     } mutableCopy];
+    if (opts.fovPreset != 0) {
+        displaySettings[@"fdefaultworldfov"] = @[@"fDefaultWorldFOV", [NSString stringWithFormat:@"%.4f", (double)opts.worldFov]];
+        displaySettings[@"fdefault1stpersonfov"] = @[@"fDefault1stPersonFOV", [NSString stringWithFormat:@"%.4f", (double)opts.firstPersonFov]];
+    }
     NSMutableDictionary *allSettings = [@{
         @"display": displaySettings,
         @"controls": @{
@@ -1420,12 +1593,14 @@ static NSString *exeHash(NSURL *url) {
     [fm createDirectoryAtPath:prefs.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:NULL];
     NSError *prefsError = nil;
     BOOL prefsOK = [[lines componentsJoinedByString:@"\n"] writeToFile:prefs atomically:YES encoding:NSISOLatin1StringEncoding error:&prefsError];
-    fprintf(stderr, "[display] render %ux%u -> output %ux%u (scale=%u%% upscaler=%s aa=%s); preset=%d tex=%d aniso=%d shadow=%d water=%d fx=%d mouse_accel=%d; user=%s; preferences=%s\n",
+    NSString *fovLog = (opts.fovPreset == 0) ? @"keep" : [NSString stringWithFormat:@"%d/%d", opts.worldFov, opts.firstPersonFov];
+    fprintf(stderr, "[display] render %ux%u -> output %ux%u (scale=%u%% upscaler=%s aa=%s); preset=%d tex=%d aniso=%d shadow=%d water=%d fx=%d fov=%s mouse_accel=%d; user=%s; preferences=%s\n",
             fnv_display_width(), fnv_display_height(), fnv_output_width(), fnv_output_height(),
             opts.renderScale, opts.upscaler == 1 ? "metalfx" : "bilinear",
             opts.antiAliasing == 1 ? "smaa" : (opts.antiAliasing == 2 ? "fxaa" : "off"),
             opts.preset, opts.textureSize, opts.anisotropy,
-            opts.shadowQuality, opts.waterQuality, opts.screenEffects, opts.disableMouseAccel ? 0 : 1,
+            opts.shadowQuality, opts.waterQuality, opts.screenEffects, fovLog.UTF8String,
+            opts.disableMouseAccel ? 0 : 1,
             userDir.fileSystemRepresentation,
             prefsOK ? "written" : prefsError.localizedDescription.UTF8String);
 
