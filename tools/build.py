@@ -10,6 +10,7 @@ import platform
 import plistlib
 import shutil
 import subprocess
+import sys
 import tempfile
 from state_probes import normalize, instrument
 from native_codecs import validate as validate_codecs
@@ -23,6 +24,14 @@ M = ROOT / 'macos'
 
 def run(cmd):
     subprocess.run(cmd, check=True)
+
+
+def run_quiet(cmd):
+    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if res.returncode != 0:
+        if res.stdout:
+            sys.stderr.write(res.stdout)
+        raise subprocess.CalledProcessError(res.returncode, cmd, output=res.stdout)
 
 
 def patch_generated_tu(content):
@@ -233,10 +242,10 @@ def bundle_dylibs(exe_path, frameworks_dir, extra_search_dirs=()):
             if orig_dep != new_ref and (orig_dep, new_ref) not in seen_changes:
                 cmd.extend(['-change', orig_dep, new_ref])
                 seen_changes.add((orig_dep, new_ref))
-        run(cmd + [str(dst)])
+        run_quiet(cmd + [str(dst)])
         for rp in rpath_map.get(src_real, []):
             if not rp.startswith('@'):
-                run(['install_name_tool', '-delete_rpath', rp, str(dst)])
+                run_quiet(['install_name_tool', '-delete_rpath', rp, str(dst)])
         bundled.append(dst)
 
     seen_exe_changes = set()
@@ -247,7 +256,7 @@ def bundle_dylibs(exe_path, frameworks_dir, extra_search_dirs=()):
             exe_cmd.extend(['-change', orig_dep, new_ref])
             seen_exe_changes.add((orig_dep, new_ref))
     if len(exe_cmd) > 1:
-        run(exe_cmd + [str(exe_path)])
+        run_quiet(exe_cmd + [str(exe_path)])
 
     # Verify self-containment: no external non-system paths remain in executable or dylibs.
     allowed_prefixes = ('/usr/lib/', '/System/', '@executable_path/../Frameworks/', '@loader_path/')
@@ -258,7 +267,7 @@ def bundle_dylibs(exe_path, frameworks_dir, extra_search_dirs=()):
             raise RuntimeError(f'External dylib reference(s) remain in {check_bin}: {bad}')
 
     for dst in bundled:
-        run(['codesign', '--force', '--sign', '-', str(dst)])
+        run_quiet(['codesign', '--force', '--sign', '-', str(dst)])
 
     total_mb = sum(p.stat().st_size for p in bundled) / (1024.0 * 1024.0)
     print(f'Bundled {len(bundled)} FFmpeg dylib(s) into {frameworks_dir.name}/ ({total_mb:.1f} MB)', flush=True)
@@ -477,7 +486,7 @@ def main():
             steam_dst = frameworks_dir / 'libsteam_api.dylib'
             shutil.copy2(args.steam_api_dylib, steam_dst)
             os.chmod(steam_dst, 0o755)
-            run(['codesign', '--force', '--sign', '-', str(steam_dst)])
+            run_quiet(['codesign', '--force', '--sign', '-', str(steam_dst)])
             (macos_dir / 'steam_appid.txt').write_text(steam_appid + '\n')
             launcher_name = exe_name + 'Launcher'
             run(base + ['-O2', '-Wall', '-Wextra',
@@ -519,7 +528,7 @@ def main():
         (contents / 'Info.plist').write_bytes(plistlib.dumps(info))
         (contents / 'PkgInfo').write_text('APPL????')
 
-        subprocess.run(['codesign', '--force', '--deep', '--sign', '-', str(bundle)], check=True)
+        run_quiet(['codesign', '--force', '--deep', '--sign', '-', str(bundle)])
 
         final_app = args.out / (app_name + '.app')
         if final_app.exists():
