@@ -1881,8 +1881,17 @@ mkdir -p \
 step "Signing app bundle & finalizing"
 
 sign_bundle() {
+	local dylib
 	find "$APP" -name "._*" -delete 2>/dev/null || true
 	xattr -cr "$APP" 2>/dev/null || true
+	if [ -d "$APP/Contents/Frameworks" ]; then
+		shopt -s nullglob
+		for dylib in "$APP/Contents/Frameworks"/*.dylib; do
+			chmod 755 "$dylib" 2>/dev/null || true
+			codesign --force --sign - "$dylib"
+		done
+		shopt -u nullglob
+	fi
 	codesign --force --deep --sign - "$APP"
 }
 run_logged_task "Ad-hoc signing $APP_NAME.app" "$TMP/codesign.log" sign_bundle || die "Code signing failed"
@@ -1975,44 +1984,21 @@ cleanup_build_cache() {
 }
 
 print_post_install_notes() {
-	local brew_cmd="brew" pkg
-	UNINSTALL_BREW=()
+	local brew_cmd="brew"
 	if [ "$BREW_SELF_INSTALLED" = yes ] || [ "$BREW_ADDED_TO_PATH" = yes ]; then
 		brew_cmd="/opt/homebrew/bin/brew"
 	fi
 	if [ -n "$GOG_INSTALLER_PATH" ]; then
 		printf '  Original GOG installer files in %s were kept (safe to delete if you do not need a backup).\n' "$(dirname "$GOG_INSTALLER_PATH")"
 	fi
-	if [ "$GAME_ID" = skyrim ]; then
-		printf '  %sNote:%s Skyrim.app dynamically links FFmpeg (libavcodec/libswresample/libavutil) for\n' "$BOLD" "$RESET"
-		printf '  xWMA audio decoding — keep %sffmpeg%s installed via Homebrew to run Skyrim.app.\n' "$BOLD" "$RESET"
-	fi
 	if [ ${#BREW_INSTALLED[@]} -gt 0 ]; then
 		printf '\n  %sHomebrew packages installed during this run:%s %s\n' "$BOLD" "$RESET" "${BREW_INSTALLED[*]}"
-		if [ "$GAME_ID" = skyrim ]; then
-			for pkg in "${BREW_INSTALLED[@]}"; do
-				[ "$pkg" = ffmpeg ] && continue
-				UNINSTALL_BREW+=("$pkg")
-			done
-			if [ ${#UNINSTALL_BREW[@]} -gt 0 ]; then
-				printf '  All except ffmpeg are build-only tools and can be uninstalled later:\n'
-				printf '    %s uninstall %s && %s cleanup\n' "$brew_cmd" "${UNINSTALL_BREW[*]}" "$brew_cmd"
-			else
-				printf '  Keep ffmpeg installed for runtime xWMA audio decoding in Skyrim.app.\n'
-			fi
-		else
-			printf '  None of them are required to play. To uninstall them later:\n'
-			printf '    %s uninstall %s && %s cleanup\n' "$brew_cmd" "${BREW_INSTALLED[*]}" "$brew_cmd"
-		fi
+		printf '  None of them are required to play. To uninstall them later:\n'
+		printf '    %s uninstall %s && %s cleanup\n' "$brew_cmd" "${BREW_INSTALLED[*]}" "$brew_cmd"
 	fi
 	if [ "$BREW_SELF_INSTALLED" = yes ]; then
 		printf '\n  %sHomebrew itself was installed into /opt/homebrew during this run.%s\n' "$BOLD" "$RESET"
-		if [ "$GAME_ID" = skyrim ]; then
-			printf '  Keep Homebrew installed while using Skyrim.app (needed for runtime ffmpeg libraries).\n'
-			printf '  If you remove both later, Homebrew'\''s official uninstall script is:\n'
-		else
-			printf '  It is not required to play. To uninstall Homebrew completely later, run its official script:\n'
-		fi
+		printf '  It is not required to play. To uninstall Homebrew completely later, run its official script:\n'
 		printf '    /bin/bash -c "$(curl -fsSL %s)"\n' "$HOMEBREW_UNINSTALL_URL"
 		printf '  Or to keep using brew in future Terminal sessions, run:\n'
 		printf '    echo '\''eval "$(/opt/homebrew/bin/brew shellenv)"'\'' >> ~/.zprofile\n'

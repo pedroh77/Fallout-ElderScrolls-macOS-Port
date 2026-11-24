@@ -21,7 +21,7 @@ All three titles share one unified recompiler, Metal backend, and `quick-install
 `quick-install.sh` guides you through the rest interactively:
 - If **Apple Command Line Tools** are missing, it offers to launch `xcode-select --install` and wait until finished.
 - If **[Homebrew](https://brew.sh/)** is missing, it explains where Homebrew lives (`/opt/homebrew`) and that removing it later requires its official uninstall script, then asks for confirmation before installing it.
-- It automatically installs the temporary build/download tools it needs (`ghidra`, `unicorn`, `cmake`, `ffmpeg`, plus `steamcmd`, `innoextract`, or `mono` only when needed; GOG downloads use standalone SHA-256-verified `gogdl` without extra Homebrew packages). Once built, Fallout 3 and New Vegas need no Homebrew packages to play; **Skyrim requires keeping `ffmpeg` installed for runtime xWMA audio decoding** (see [Notes on Cleanup](#notes-on-cleanup)).
+- It automatically installs the temporary build/download tools it needs (`ghidra`, `unicorn`, `cmake`, `ffmpeg`, plus `steamcmd`, `innoextract`, or `mono` only when needed; GOG downloads use standalone SHA-256-verified `gogdl` without extra Homebrew packages). **None of them are required to play once the `.app` is built** (see [Notes on Cleanup](#notes-on-cleanup)).
 - If no local game folder or GOG installer is found, it lets you **download directly from Steam (`steamcmd`) or GOG (`gogdl`)**, or **enter / drag-and-drop** a game folder, `.exe`, `.app`, or GOG `setup_*.exe` installer.
 
 The finished app is placed in `~/Applications/Fallout 3.app`, `~/Applications/Fallout New Vegas.app`, or `~/Applications/Skyrim.app`.
@@ -55,7 +55,7 @@ This repository adapts **[FNV-iOS-Shim](https://github.com/arjuk95-dot/FNV-iOS-S
   * Distinct bundle identities (`dev.f3mac.fallout3`, `dev.fnvmac.<target>`, `dev.skyrimmac.<target>`), `.icns` artwork (`AppIcon-Fallout3.png`, `AppIcon.png`, `AppIcon-Skyrim.png`), `LSApplicationCategoryType: public.app-category.games`, and `lsregister -f` registration in `quick-install.sh` ensure **macOS Game Mode** shows the right icon for every app ([docs/GAME-MODE-ICONS.md](docs/GAME-MODE-ICONS.md)).
 * **Audio & video pipelines (`macos/FNVAudioMixer.c`, `macos/FNVXAudioMixer.c`, `upstream/recomp/host/xaudio2.c`):**
   * **All 3 games:** `AVAudioEngine` native PCM mixer, pinned Ogg/Vorbis decoding, DirectShow pull-source (`dshow.m`), and `AVFoundation` `.mp4` playback (`FNVNativeVideo.m`, transcoded from `.bik`).
-  * **Skyrim (`-DFNV_GAME_SKYRIM`):** adds XAudio2 COM shims (`upstream/recomp/host/xaudio2.c`), a dedicated XAudio2 mixer backend (`macos/FNVXAudioMixer.c`), and dynamic FFmpeg decoding (`libavcodec`, `libswresample`, `libavutil` detected by `tools/build.py` `find_ffmpeg()`) for Skyrim's xWMA/ADPCM audio assets.
+  * **Skyrim (`-DFNV_GAME_SKYRIM`):** adds XAudio2 COM shims (`upstream/recomp/host/xaudio2.c`), a dedicated XAudio2 mixer backend (`macos/FNVXAudioMixer.c`), and FFmpeg xWMA/ADPCM audio decoding (`tools/build.py` bundles `libavcodec`, `libswresample`, `libavutil`, and their transitive `.dylib` dependencies inside `Skyrim.app/Contents/Frameworks/` with `@loader_path` / `@executable_path/../Frameworks` install names so `Skyrim.app` runs standalone with no Homebrew runtime dependency).
 * **Restored Unicorn Engine fallback:**
   * `upstream/recomp/host/fallback.c` + `libunicorn.a` handle any uncompiled code paths or edge-case instructions.
 * **Precomputed symbol maps (`symbols/fallout3/`, `symbols/fallout3-steam/`, `symbols/fnv/`, `symbols/fnv-steam/`, `symbols/skyrim/`):**
@@ -256,13 +256,14 @@ Holding `Option` on launch (or leaving "Skip launcher" unchecked) opens the nati
 
 ## Notes on Cleanup
 
-* **Fallout 3 & Fallout: New Vegas:** None of the Homebrew build/download packages (`ghidra`, `unicorn`, `cmake`, `ffmpeg`, `mono`, `innoextract`, `steamcmd`) are needed once `.app` is built (`libunicorn.a` is statically linked and `.bik` cutscenes are converted to `.mp4`).
-* **Skyrim (`Skyrim.app`) FFmpeg runtime requirement:** `tools/build.py --game skyrim` dynamically links Homebrew/MacPorts `libavcodec`, `libswresample`, and `libavutil` (`-Wl,-rpath,...`) for real-time xWMA audio decoding via `xaudio2.c`. **Keep `ffmpeg` (and Homebrew if installed in `/opt/homebrew`) installed if you play `Skyrim.app`.** `quick-install.sh` excludes `ffmpeg` from its end-of-run uninstall command when building Skyrim.
+**None of the Homebrew packages or build tools are needed to play once the `.app` is built.** `libunicorn.a` is statically linked into the app binary, `.bik` cutscenes are already converted to `.mp4`, Ghidra only runs during translation, and Skyrim's FFmpeg xWMA decoders (`libavcodec`, `libswresample`, `libavutil` and dependencies) are bundled directly inside `Skyrim.app/Contents/Frameworks/`.
+
+`quick-install.sh` cleans up leftover source files, `gogdl`, and `~/Library/Caches/fnv-macos` automatically upon success (unless `--keep-cache` is passed), and intentionally does **not** uninstall global software from your Mac. At the end of a run, it prints the exact list of any Homebrew packages it installed together with a ready-to-copy `brew uninstall` command (and if `quick-install.sh` installed Homebrew itself during that run, it also prints the official Homebrew uninstall script command).
 
 To remove build-only tools later:
 
 ```sh
-# Remove all build/download packages (omit ffmpeg if you built Skyrim!)
+# Remove all build/download packages
 for p in ghidra unicorn cmake ffmpeg mono innoextract depotdownloader steamcmd; do
   brew list "$p" &>/dev/null && brew uninstall "$p"
 done && brew cleanup
@@ -274,7 +275,7 @@ brew untap steamre/tools 2>/dev/null
 rm -rf ~/Library/Caches/fnv-macos
 ```
 
-If you only installed Apple Command Line Tools (`sudo rm -rf /Library/Developer/CommandLineTools`) or Homebrew ([official uninstall script](https://github.com/homebrew/install#uninstall-homebrew)) for this port, you can remove them too — again keeping Homebrew + `ffmpeg` if playing `Skyrim.app`.
+If you only installed Apple Command Line Tools (`sudo rm -rf /Library/Developer/CommandLineTools`) or Homebrew ([official uninstall script](https://github.com/homebrew/install#uninstall-homebrew)) for this port, you can safely remove them as well once your `.app` bundles are built.
 
 **Keep these files to continue playing:**
 * `~/Applications/Fallout 3.app`, `~/Applications/Fallout New Vegas.app`, and/or `~/Applications/Skyrim.app`.

@@ -82,11 +82,187 @@ def find_unicorn(explicit):
 
 def find_ffmpeg():
     """Find FFmpeg headers and dylibs (libavcodec/libswresample/libavutil) for xWMA decoding."""
-    for candidate in ['/opt/local', '/opt/homebrew/opt/ffmpeg', '/opt/homebrew', '/usr/local']:
+    for candidate in ['/opt/homebrew/opt/ffmpeg', '/opt/homebrew', '/opt/local', '/usr/local']:
         p = Path(candidate)
         if (p / 'include/libavcodec/avcodec.h').is_file() and (p / 'lib/libavcodec.dylib').is_file():
             return p
     return None
+
+
+def _macho_deps_and_rpaths(path):
+    """Return (install_id, deps, rpaths) parsed from otool for a Mach-O binary."""
+    id_lines = subprocess.check_output(['otool', '-D', str(path)], text=True).splitlines()
+    install_id = id_lines[1].strip() if len(id_lines) > 1 else None
+
+    l_lines = subprocess.check_output(['otool', '-L', str(path)], text=True).splitlines()
+    deps = []
+    skipped_self = False
+    for line in l_lines[1:]:
+        dep = line.strip().split(' (', 1)[0]
+        if not dep:
+            continue
+        if install_id and not skipped_self and dep == install_id:
+            skipped_self = True
+            continue
+        deps.append(dep)
+
+    cmd_lines = subprocess.check_output(['otool', '-l', str(path)], text=True).splitlines()
+    rpaths = []
+    for i, line in enumerate(cmd_lines):
+        if 'cmd LC_RPATH' in line:
+            for j in range(i + 1, min(i + 6, len(cmd_lines))):
+                if 'path ' in cmd_lines[j]:
+                    rp = cmd_lines[j].split('path ', 1)[1].rsplit(' (offset', 1)[0].strip()
+                    if rp not in rpaths:
+                        rpaths.append(rp)
+                    break
+    return install_id, deps, rpaths
+
+
+def _is_system_dylib(dep):
+    return dep.startswith('/usr/lib/') or dep.startswith('/System/')
+
+
+def _resolve_dylib_path(dep, cur_path, cur_real, exe_path, cur_rpaths, search_dirs):
+    """Resolve a non-system Mach-O dependency reference to an existing file on disk."""
+    candidates = []
+    if dep.startswith('@loader_path/'):
+        rel = dep[len('@loader_path/'):]
+        candidates.extend([cur_real.parent / rel, cur_path.parent / rel])
+    elif dep.startswith('@executable_path/'):
+        rel = dep[len('@executable_path/'):]
+        candidates.append(exe_path.parent / rel)
+    elif dep.startswith('@rpath/'):
+        rel = dep[len('@rpath/'):]
+        for rp in cur_rpaths:
+            if rp == '@loader_path':
+                candidates.extend([cur_real.parent / rel, cur_path.parent / rel])
+            elif rp.startswith('@loader_path/'):
+                sub = rp[len('@loader_path/'):]
+                candidates.extend([cur_real.parent / sub / rel, cur_path.parent / sub / rel])
+            elif rp == '@executable_path':
+                candidates.append(exe_path.parent / rel)
+            elif rp.startswith('@executable_path/'):
+                sub = rp[len('@executable_path/'):]
+                candidates.append(exe_path.parent / sub / rel)
+            else:
+                candidates.append(Path(rp) / rel)
+        for sd in [cur_real.parent, cur_path.parent, *search_dirs]:
+            candidates.append(Path(sd) / rel)
+    else:
+        candidates.append(Path(dep))
+
+    for cand in candidates:
+        resolved = Path(os.path.normpath(str(cand)))
+        if resolved.exists():
+            return Path(os.path.realpath(str(resolved)))
+    raise RuntimeError(f'Unresolved dylib dependency {dep!r} needed by {cur_path}')
+
+
+def bundle_dylibs(exe_path, frameworks_dir, extra_search_dirs=()):
+    """Copy non-system dylib closure into Frameworks/ and rewrite load paths cleanly."""
+    exe_path = Path(exe_path)
+    exe_real = Path(os.path.realpath(str(exe_path)))
+    frameworks_dir = Path(frameworks_dir)
+    frameworks_dir.mkdir(parents=True, exist_ok=True)
+    extra_dirs = [Path(d) for d in extra_search_dirs]
+
+    _, exe_deps, exe_rpaths = _macho_deps_and_rpaths(exe_real)
+    base_search_dirs = [*extra_dirs]
+    for rp in exe_rpaths:
+        if not rp.startswith('@'):
+            base_search_dirs.append(Path(rp))
+
+    # Map real_path -> bundled basename, and record non-system dependency mappings per binary.
+    by_real = {}
+    by_name = {}
+    dep_map = {}  # binary_real -> list of (orig_dep_str, target_real)
+    rpath_map = {}
+    queue = []
+
+    exe_changes = []
+    for dep in exe_deps:
+        if _is_system_dylib(dep):
+            continue
+        target_real = _resolve_dylib_path(dep, exe_path, exe_real, exe_path, exe_rpaths, base_search_dirs)
+        exe_changes.append((dep, target_real))
+        if target_real not in by_real:
+            name = target_real.name
+            if name in by_name and by_name[name] != target_real:
+                raise RuntimeError(f'Dylib basename collision for {name}: {by_name[name]} vs {target_real}')
+            by_real[target_real] = name
+            by_name[name] = target_real
+            queue.append(target_real)
+    dep_map[exe_real] = exe_changes
+
+    visited_dylibs = set()
+    while queue:
+        cur_real = queue.pop(0)
+        if cur_real in visited_dylibs:
+            continue
+        visited_dylibs.add(cur_real)
+        _, cur_deps, cur_rpaths = _macho_deps_and_rpaths(cur_real)
+        rpath_map[cur_real] = cur_rpaths
+        cur_changes = []
+        for dep in cur_deps:
+            if _is_system_dylib(dep):
+                continue
+            target_real = _resolve_dylib_path(dep, cur_real, cur_real, exe_path, cur_rpaths, base_search_dirs)
+            cur_changes.append((dep, target_real))
+            if target_real not in by_real:
+                name = target_real.name
+                if name in by_name and by_name[name] != target_real:
+                    raise RuntimeError(f'Dylib basename collision for {name}: {by_name[name]} vs {target_real}')
+                by_real[target_real] = name
+                by_name[name] = target_real
+                queue.append(target_real)
+        dep_map[cur_real] = cur_changes
+
+    if not by_real:
+        return []
+
+    bundled = []
+    for src_real, bundled_name in sorted(by_real.items(), key=lambda item: item[1]):
+        dst = frameworks_dir / bundled_name
+        shutil.copy2(src_real, dst)
+        os.chmod(dst, 0o755)
+        cmd = ['install_name_tool', '-id', f'@rpath/{bundled_name}']
+        seen_changes = set()
+        for orig_dep, target_real in dep_map.get(src_real, []):
+            new_ref = f'@loader_path/{by_real[target_real]}'
+            if orig_dep != new_ref and (orig_dep, new_ref) not in seen_changes:
+                cmd.extend(['-change', orig_dep, new_ref])
+                seen_changes.add((orig_dep, new_ref))
+        run(cmd + [str(dst)])
+        for rp in rpath_map.get(src_real, []):
+            if not rp.startswith('@'):
+                run(['install_name_tool', '-delete_rpath', rp, str(dst)])
+        bundled.append(dst)
+
+    seen_exe_changes = set()
+    exe_cmd = ['install_name_tool']
+    for orig_dep, target_real in dep_map.get(exe_real, []):
+        new_ref = f'@executable_path/../Frameworks/{by_real[target_real]}'
+        if orig_dep != new_ref and (orig_dep, new_ref) not in seen_exe_changes:
+            exe_cmd.extend(['-change', orig_dep, new_ref])
+            seen_exe_changes.add((orig_dep, new_ref))
+    if len(exe_cmd) > 1:
+        run(exe_cmd + [str(exe_path)])
+
+    # Verify self-containment: no external non-system paths remain in executable or dylibs.
+    allowed_prefixes = ('/usr/lib/', '/System/', '@executable_path/../Frameworks/', '@loader_path/')
+    for check_bin in [exe_path, *bundled]:
+        _, final_deps, _ = _macho_deps_and_rpaths(check_bin)
+        bad = [d for d in final_deps if not d.startswith(allowed_prefixes)]
+        if bad:
+            raise RuntimeError(f'External dylib reference(s) remain in {check_bin}: {bad}')
+
+    for dst in bundled:
+        run(['codesign', '--force', '--sign', '-', str(dst)])
+
+    total_mb = sum(p.stat().st_size for p in bundled) / (1024.0 * 1024.0)
+    print(f'Bundled {len(bundled)} FFmpeg dylib(s) into {frameworks_dir.name}/ ({total_mb:.1f} MB)', flush=True)
+    return bundled
 
 
 GAME_PROFILES = {
@@ -284,11 +460,13 @@ def main():
         if unicorn:
             libraries.append(str(unicorn / 'lib/libunicorn.a'))
 
-        link_flags = ['-Wl,-stack_size,0x4000000']
+        link_flags = ['-Wl,-stack_size,0x4000000', '-Wl,-headerpad_max_install_names']
         if ffmpeg:
             libraries += ['-L' + str(ffmpeg / 'lib'), '-lavcodec', '-lswresample', '-lavutil']
-            link_flags.append('-Wl,-rpath,' + str(ffmpeg / 'lib'))
+            link_flags.append('-Wl,-rpath,@executable_path/../Frameworks')
         run(base + objects + libraries + [v for f in frameworks for v in ('-framework', f)] + link_flags + ['-o', str(macos_dir / exe_name)])
+        if ffmpeg:
+            bundle_dylibs(macos_dir / exe_name, contents / 'Frameworks', extra_search_dirs=[ffmpeg / 'lib'])
 
         bundle_exe = exe_name
         if codec:
@@ -296,7 +474,10 @@ def main():
         if not probe and args.steam_api_dylib and args.steam_api_dylib.is_file():
             frameworks_dir = contents / 'Frameworks'
             frameworks_dir.mkdir(exist_ok=True)
-            shutil.copy2(args.steam_api_dylib, frameworks_dir / 'libsteam_api.dylib')
+            steam_dst = frameworks_dir / 'libsteam_api.dylib'
+            shutil.copy2(args.steam_api_dylib, steam_dst)
+            os.chmod(steam_dst, 0o755)
+            run(['codesign', '--force', '--sign', '-', str(steam_dst)])
             (macos_dir / 'steam_appid.txt').write_text(steam_appid + '\n')
             launcher_name = exe_name + 'Launcher'
             run(base + ['-O2', '-Wall', '-Wextra',
