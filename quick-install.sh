@@ -711,8 +711,13 @@ if [ -f "$CODEC_PREFIX/codec-manifest.json" ] && \
    python3 -c "import sys; sys.path.insert(0, '$SCRIPT_DIR/tools'); from native_codecs import validate; validate('$CODEC_PREFIX', 'macos')" >/dev/null 2>&1; then
 	ok "Using cached macOS Ogg/Vorbis codecs"
 else
-	run_task "Building pinned Ogg/Vorbis static libraries" \
-		python3 "$SCRIPT_DIR/tools/build_codecs.py" macos --out "$CODECS_DIR"
+	CODECS_LOG="$TMP/codecs.log"
+	if ! run_task "Building pinned Ogg/Vorbis static libraries" \
+		bash -c 'python3 "$1" macos --out "$2" >"$3" 2>&1' _ \
+		"$SCRIPT_DIR/tools/build_codecs.py" "$CODECS_DIR" "$CODECS_LOG"; then
+		cat "$CODECS_LOG" >&2 || true
+		die "Building Ogg/Vorbis codecs failed."
+	fi
 fi
 
 # ---------------------------------------------------------------------------
