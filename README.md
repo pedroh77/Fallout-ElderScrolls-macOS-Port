@@ -9,8 +9,8 @@ All three titles share one unified recompiler, Metal backend, and `quick-install
 **What you need upfront:**
 1. An **Apple Silicon Mac** (M1 or newer) running **macOS 14 (Sonoma)** or later.
 2. **Your own PC copy** of at least one supported game:
-   - **Fallout 3 GOTY / Fallout: New Vegas (Steam or GOG):** for GOG, download the offline backup installer (`setup_fallout_*.exe` + `.bin` parts) into `~/Downloads/`; for Steam, let `./quick-install.sh` download it via `steamcmd`.
-   - **The Elder Scrolls V: Skyrim 32-bit LE (Steam AppID `72850`, patch `1.9.32.0.8`):** Windows-only on Steam — *Special Edition* and *Anniversary Edition* are not supported. No manual pre-download needed (`--download` or interactive mode installs `steamcmd` and fetches it for you).
+   - **Fallout 3 GOTY / Fallout: New Vegas (Steam or GOG):** no manual pre-download needed — `./quick-install.sh` can fetch your **Steam** copy via `steamcmd` or your **GOG** copy directly via `gogdl` using a temporary browser login (`--download` / `--download-gog`), or extract an offline GOG backup (`setup_fallout_*.exe` + `.bin` parts) placed in `~/Downloads/`.
+   - **The Elder Scrolls V: Skyrim 32-bit LE (Steam AppID `72850`, patch `1.9.32.0.8`):** Windows-only on Steam — *Special Edition* and *Anniversary Edition* are not supported. No manual pre-download needed (`--download` or `--download-steam` installs `steamcmd` and fetches it for you).
 
 **Build & install:**
 
@@ -21,8 +21,8 @@ All three titles share one unified recompiler, Metal backend, and `quick-install
 `quick-install.sh` guides you through the rest interactively:
 - If **Apple Command Line Tools** are missing, it offers to launch `xcode-select --install` and wait until finished.
 - If **[Homebrew](https://brew.sh/)** is missing, it explains where Homebrew lives (`/opt/homebrew`) and that removing it later requires its official uninstall script, then asks for confirmation before installing it.
-- It automatically installs the temporary build/download tools it needs (`ghidra`, `unicorn`, `cmake`, `ffmpeg`, plus `steamcmd`, `innoextract`, or `mono` only when needed). Once built, Fallout 3 and New Vegas need no Homebrew packages to play; **Skyrim requires keeping `ffmpeg` installed for runtime xWMA audio decoding** (see [Notes on Cleanup](#notes-on-cleanup)).
-- If no local game folder or GOG installer is found, it lets you **download from Steam via `steamcmd`** or **enter / drag-and-drop** a game folder, `.exe`, `.app`, or GOG `setup_*.exe` installer.
+- It automatically installs the temporary build/download tools it needs (`ghidra`, `unicorn`, `cmake`, `ffmpeg`, plus `steamcmd`, `innoextract`, or `mono` only when needed; GOG downloads use standalone SHA-256-verified `gogdl` without extra Homebrew packages). Once built, Fallout 3 and New Vegas need no Homebrew packages to play; **Skyrim requires keeping `ffmpeg` installed for runtime xWMA audio decoding** (see [Notes on Cleanup](#notes-on-cleanup)).
+- If no local game folder or GOG installer is found, it lets you **download directly from Steam (`steamcmd`) or GOG (`gogdl`)**, or **enter / drag-and-drop** a game folder, `.exe`, `.app`, or GOG `setup_*.exe` installer.
 
 The finished app is placed in `~/Applications/Fallout 3.app`, `~/Applications/Fallout New Vegas.app`, or `~/Applications/Skyrim.app`.
 
@@ -158,7 +158,17 @@ depotdownloader -app 72850 -os windows -username <YOUR_STEAM_USERNAME> -dir "$HO
 2. Download the Windows base + DLC depots (`download_depot <APPID> <DEPOT_ID>`).
 3. Merge the downloaded `depot_*` folders from `~/Library/Application Support/Steam/steamapps/content/app_<APPID>/` into a single folder so the game `.exe` and `Data/` sit together.
 
-### Option 2: GOG Offline Installer (Fallout 3 & Fallout: New Vegas)
+### Option 2: GOG (Fallout 3 GOTY & Fallout: New Vegas)
+
+#### Method A — Automatic download via `gogdl` (easiest)
+
+Run `./quick-install.sh --download` (or jump straight to GOG with `./quick-install.sh --download-gog`, or let interactive mode offer it when no local files are found):
+
+* Downloads the standalone Apple Silicon **[heroic-gogdl](https://github.com/Heroic-Games-Launcher/heroic-gogdl)** binary (`v1.4.0`, verified by SHA-256 — no extra Homebrew packages and no `innoextract` extraction step needed).
+* Opens the official GOG login page in your default browser (supporting 2FA/CAPTCHA naturally), asks you to paste the redirected `on_login_success?...` URL back into Terminal, and keeps the temporary OAuth session strictly inside a private temp directory deleted on exit (never touching Heroic or other apps).
+* Downloads the unpacked Windows build + DLCs directly from GOG (`1454315831` for *Fallout 3 GOTY*, `1454587428` for *Fallout: New Vegas Ultimate Edition*).
+
+#### Method B — GOG Offline Installer (optional local backup)
 
 Download the GOG offline backup installer files into `~/Downloads/`:
 * **Fallout 3 GOTY:** `setup_fallout_3_1.7.0.3_(12034).exe` plus its `.bin` parts.
@@ -174,8 +184,12 @@ Run `./quick-install.sh` (or pass `./quick-install.sh ~/Downloads/setup_fallout_
 # Auto-detect Fallout 3, Fallout: New Vegas, and Skyrim across common paths
 ./quick-install.sh
 
-# Download from Steam via steamcmd and build immediately
+# Download interactively from Steam or GOG and build immediately
 ./quick-install.sh --download
+
+# Or jump straight to a specific store
+./quick-install.sh --download-steam --game skyrim
+./quick-install.sh --download-gog --game fnv
 
 # Restrict auto-detection or --download to a single game
 ./quick-install.sh --game fallout3

@@ -6,21 +6,24 @@
 # into a standalone Apple Silicon macOS bundle ("Fallout New Vegas.app",
 # "Fallout 3.app", or "Skyrim.app").
 #
-# Usage: quick-install.sh [--game fnv|fallout3|skyrim] [--download] [--dmg] [--keep-cache] [--keep-ghidra] [--unpack-drm] [--no-steam] [--with-steam] [-h|--help] [game_path]
-#   --game <id>      select game explicitly: fnv, fallout3, or skyrim (default:
-#                    auto-detect; a numbered menu appears when several are found)
-#   --download       download your Windows copy from Steam via steamcmd
-#   --dmg            also wrap the app in "<App Name>.dmg"
-#   --keep-cache     keep ~/Library/Caches/fnv-macos after a successful build (for faster rebuilds)
-#   --keep-ghidra    keep the Ghidra project and P-code JSONL after translation (implies --keep-cache)
-#   --unpack-drm     unattended: allow downloading Steamless + Mono to strip SteamStub DRM
-#   --no-steam       keep Steam builds in offline mode (skip Steam launcher, overlay & libsteam_api.dylib; already default for Fallout 3)
-#   --with-steam     opt into Steam launcher & Overlay for Fallout 3 Steam builds (off by default)
-#   -h, --help       show help text and exit
-#   game_path        optional GOG installer (.exe), folder containing FalloutNV.exe,
-#                    Fallout3.exe, or TESV.exe + Data/, or an existing app bundle.
+# Usage: quick-install.sh [--game fnv|fallout3|skyrim] [--download|--download-steam|--download-gog] [--dmg] [--keep-cache] [--keep-ghidra] [--unpack-drm] [--no-steam] [--with-steam] [-h|--help] [game_path]
+#   --game <id>       select game explicitly: fnv, fallout3, or skyrim (default:
+#                     auto-detect; a numbered menu appears when several are found)
+#   --download        download your Windows copy interactively from Steam or GOG
+#   --download-steam  download directly from Steam via steamcmd
+#   --download-gog    download Fallout 3 / FNV directly from GOG via gogdl
+#   --dmg             also wrap the app in "<App Name>.dmg"
+#   --keep-cache      keep ~/Library/Caches/fnv-macos after a successful build (for faster rebuilds)
+#   --keep-ghidra     keep the Ghidra project and P-code JSONL after translation (implies --keep-cache)
+#   --unpack-drm      unattended: allow downloading Steamless + Mono to strip SteamStub DRM
+#   --no-steam        keep Steam builds in offline mode (skip Steam launcher, overlay & libsteam_api.dylib; already default for Fallout 3)
+#   --with-steam      opt into Steam launcher & Overlay for Fallout 3 Steam builds (off by default)
+#   -h, --help        show help text and exit
+#   game_path         optional GOG installer (.exe), folder containing FalloutNV.exe,
+#                     Fallout3.exe, or TESV.exe + Data/, or an existing app bundle.
 set -euo pipefail
 
+main() {
 GOG_EXE_SHA256="89e7020487e80f20ddc92ea641c4433b2c6839a82f45a076e414d167d11dd0fe"
 STEAM_OG_EXE_SHA256="3a87f92f011e5dc9179ddf733cf08be2b39ea6e5b7a8a9e3a9a72dafcc1b104d"
 STEAM_UNPACKED_EXE_SHA256="19406942e48724d797300c4ea6be9ac69a32f670b8c35db09279a2258422739f"
@@ -34,6 +37,12 @@ STEAMLESS_URL="https://github.com/atom0s/Steamless/releases/download/v3.1.0.5/St
 STEAMLESS_ZIP_SHA256="e3e2d22e098ff3fb359b2876aa2bed9596f0501e6ff588cbffae90a76d2dc4f5"
 STEAMWORKS_URL="https://github.com/rlabrecque/Steamworks.NET/releases/download/20.1.0/Steamworks.NET_20.1.0.unitypackage"
 STEAMWORKS_SHA256="3be79e6bdf53c86210267bf39f46362bb839130896006aec26364c5efc37e314"
+GOGDL_VERSION="v1.4.0"
+GOGDL_URL="https://github.com/Heroic-Games-Launcher/heroic-gogdl/releases/download/v1.4.0/gogdl_macos_arm64"
+GOGDL_SHA256="af167d29ca822f495ff677d03c40bb9d6dc5535dac1f30d71775c91fe844149c"
+GOG_AUTH_URL="https://auth.gog.com/auth?client_id=46899977096215655&redirect_uri=https%3A%2F%2Fembed.gog.com%2Fon_login_success%3Forigin%3Dclient&response_type=code&layout=client2"
+GOG_FNV_ID="1454587428"
+GOG_FO3_ID="1454315831"
 HOMEBREW_INSTALL_URL="https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
 HOMEBREW_UNINSTALL_URL="https://raw.githubusercontent.com/Homebrew/install/HEAD/uninstall.sh"
 APP_NAME="Fallout New Vegas"
@@ -171,6 +180,25 @@ run_task() {
 	return "$rc"
 }
 
+run_task_to_log() {
+	local log_file="$1"
+	shift
+	"$@" >"$log_file" 2>&1
+}
+
+run_logged_task() {
+	local label="$1" log_file="$2"
+	shift 2
+	if ! run_task "$label" run_task_to_log "$log_file" "$@"; then
+		if [ -s "$log_file" ]; then
+			printf '  %sLast lines of %s:%s\n' "$DIM" "$log_file" "$RESET" >&2
+			tail -n 60 "$log_file" | sed 's/^/    /' >&2 || true
+		fi
+		return 1
+	fi
+	return 0
+}
+
 # ---------------------------------------------------------------------------
 # Options & System Checks
 # ---------------------------------------------------------------------------
@@ -184,7 +212,9 @@ macOS app bundle in ~/Applications.
 
 Options:
   --game <fnv|fallout3|skyrim>  Select game explicitly (default: auto-detect)
-  --download                    Download Windows game files from Steam via steamcmd
+  --download                    Download game files interactively (Steam or GOG)
+  --download-steam              Download Windows game files from Steam via steamcmd
+  --download-gog                Download Fallout 3 / FNV from GOG via gogdl
   --dmg                         Also wrap the built app in "<App Name>.dmg"
   --keep-cache                  Keep ~/Library/Caches/fnv-macos after building
   --keep-ghidra                 Keep Ghidra project & P-code JSONL (implies --keep-cache)
@@ -199,14 +229,15 @@ Arguments:
 Examples:
   ./quick-install.sh
   ./quick-install.sh --download
+  ./quick-install.sh --download-gog --game fnv
+  ./quick-install.sh --download-steam --game skyrim
   ./quick-install.sh --game fallout3
-  ./quick-install.sh --game skyrim
   ./quick-install.sh ~/Downloads/setup_fallout_3_*.exe
 EOF
 }
 
 WANT_DMG=no
-WANT_DOWNLOAD=no
+DOWNLOAD_MODE=""
 KEEP_CACHE=no
 if { [ -n "${FNV_KEEP_CACHE:-}" ] && [ "${FNV_KEEP_CACHE}" != "0" ]; } || \
    { [ -n "${SKYRIM_KEEP_CACHE:-}" ] && [ "${SKYRIM_KEEP_CACHE}" != "0" ]; }; then
@@ -224,7 +255,9 @@ BREW_ADDED_TO_PATH=no
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--dmg) WANT_DMG=yes ;;
-		--download) WANT_DOWNLOAD=yes ;;
+		--download) DOWNLOAD_MODE="prompt" ;;
+		--download-steam) DOWNLOAD_MODE="steam" ;;
+		--download-gog) DOWNLOAD_MODE="gog" ;;
 		--keep-cache) KEEP_CACHE=yes ;;
 		--keep-ghidra) KEEP_GHIDRA=yes; KEEP_CACHE=yes ;;
 		--unpack-drm) UNPACK_DRM=yes ;;
@@ -248,11 +281,14 @@ case "$GAME_ID" in
 	*) die "Unsupported --game value '$GAME_ID' (expected fnv, fallout3, or skyrim)." ;;
 esac
 
-if [ "$WANT_DOWNLOAD" = yes ] && [ -n "$GAME_ARG" ]; then
-	die "Cannot combine --download with an explicit game path."
+if [ -n "$DOWNLOAD_MODE" ] && [ -n "$GAME_ARG" ]; then
+	die "Cannot combine --download / --download-steam / --download-gog with an explicit game path."
 fi
-if [ "$WANT_DOWNLOAD" = yes ] && [ ! -t 0 ]; then
-	die "--download requires an interactive terminal (SteamCMD needs your Steam login & Steam Guard)."
+if [ "$DOWNLOAD_MODE" = gog ] && [ "$GAME_ID" = skyrim ]; then
+	die "The Elder Scrolls V: Skyrim (32-bit LE) is only available on Steam (use --download-steam or --download)."
+fi
+if [ -n "$DOWNLOAD_MODE" ] && [ ! -t 0 ]; then
+	die "--download requires an interactive terminal (Steam/GOG login requires interactive prompts)."
 fi
 
 ensure_brew_in_path() {
@@ -372,7 +408,10 @@ cleanup() {
 	[ -n "$DEV" ] && hdiutil detach "$DEV" >/dev/null 2>&1 || true
 	if [ -n "$TMP" ]; then
 		if [ -n "$GDATA" ] && [ -d "$GDATA" ] && [ -n "$(ls -A "$GDATA" 2>/dev/null)" ]; then
-			printf '  %s⚠ Note:%s Preserving moved game files at %s\n' "$GOLD" "$RESET" "$APP" >&2
+			printf '  %s⚠ Note:%s Preserving moved game files in your user temp directory (no admin needed):\n' "$GOLD" "$RESET" >&2
+			printf '    %s\n' "$APP" >&2
+			printf '    Locate in Finder: open -R "%s"\n' "$APP" >&2
+			printf '    Discard & free space: rm -rf "%s"\n' "$TMP" >&2
 		else
 			rm -rf "$TMP"
 		fi
@@ -424,6 +463,10 @@ game_channel() {
 				echo "Steam"; return
 			fi
 			;;
+	esac
+	case "$dir" in
+		*/gog-download/*)
+			echo "GOG"; return ;;
 	esac
 	if compgen -G "$dir/goggame-*.info" >/dev/null 2>&1 || compgen -G "$dir/goggame-*.hashdb" >/dev/null 2>&1; then
 		echo "GOG"; return
@@ -735,8 +778,305 @@ download_game_via_steamcmd() {
 	done
 }
 
-if [ "$WANT_DOWNLOAD" = yes ]; then
+GOG_DL_GAME=""
+GOG_DL_ID=""
+GOGDL_BIN=""
+GOG_AUTH_FILE="$TMP/gog-auth.json"
+GOG_CFG_DIR="$TMP/gogdl-cfg"
+
+select_gog_download_target() {
+	local choice
+	GOG_DL_GAME=""
+	GOG_DL_ID=""
+	if [ "$GAME_ID" = fnv ]; then
+		GOG_DL_GAME="fnv"
+		GOG_DL_ID="$GOG_FNV_ID"
+		return 0
+	elif [ "$GAME_ID" = fallout3 ]; then
+		GOG_DL_GAME="fallout3"
+		GOG_DL_ID="$GOG_FO3_ID"
+		return 0
+	else
+		while true; do
+			printf '\n%sWhich GOG game do you own and want to download?%s\n' "$BOLD" "$RESET"
+			printf '  %s1)%s Fallout: New Vegas Ultimate Edition (GOG ID %s)\n' "$GOLD" "$RESET" "$GOG_FNV_ID"
+			printf '  %s2)%s Fallout 3: Game of the Year Edition (GOG ID %s)\n' "$GOLD" "$RESET" "$GOG_FO3_ID"
+			printf '  Select [1-2] (or q to quit): '
+			read -r choice || die "Aborted."
+			case "$choice" in
+				1) GOG_DL_GAME="fnv"; GOG_DL_ID="$GOG_FNV_ID"; return 0 ;;
+				2) GOG_DL_GAME="fallout3"; GOG_DL_ID="$GOG_FO3_ID"; return 0 ;;
+				[qQ]|[qQ][uU][iI][tT]) die "GOG download aborted." ;;
+				*) warn "Please enter 1 or 2 (or q to quit)." ;;
+			esac
+		done
+	fi
+}
+
+ensure_gogdl() {
+	local cache_dir="$CACHE_ROOT/gogdl/$GOGDL_VERSION"
+	local cached_bin="$cache_dir/gogdl"
+	local dl_tmp="$TMP/gogdl_macos_arm64"
+	local got_sha=""
+	if [ -f "$cached_bin" ]; then
+		got_sha="$(shasum -a 256 "$cached_bin" | awk '{print $1}')"
+		if [ "$got_sha" = "$GOGDL_SHA256" ]; then
+			chmod +x "$cached_bin" 2>/dev/null || true
+			GOGDL_BIN="$cached_bin"
+			ok "Using cached gogdl ($GOGDL_VERSION)"
+			return 0
+		fi
+		rm -f "$cached_bin"
+	fi
+	if ! run_logged_task "Downloading heroic-gogdl ($GOGDL_VERSION)" "$TMP/download.log" \
+		curl -fsSL --retry 3 "$GOGDL_URL" -o "$dl_tmp"; then
+		rm -f "$dl_tmp"
+		die "Failed to download heroic-gogdl ($GOGDL_VERSION) from GitHub Releases."
+	fi
+	got_sha="$(shasum -a 256 "$dl_tmp" | awk '{print $1}')"
+	if [ "$got_sha" != "$GOGDL_SHA256" ]; then
+		rm -f "$dl_tmp"
+		die "Downloaded gogdl SHA-256 mismatch." \
+			"Expected: $GOGDL_SHA256" \
+			"Got:      $got_sha"
+	fi
+	mkdir -p "$cache_dir"
+	mv "$dl_tmp" "$cached_bin"
+	chmod +x "$cached_bin"
+	GOGDL_BIN="$cached_bin"
+	ok "Verified heroic-gogdl ($GOGDL_VERSION)"
+}
+
+extract_gog_auth_code() {
+	python3 - "${1:-}" <<'PY'
+import re, sys, urllib.parse
+raw = sys.argv[1].strip().strip('\'"')
+if not raw:
+    sys.exit(0)
+if '://' in raw or 'code=' in raw:
+    parsed = urllib.parse.urlparse(raw)
+    qs = urllib.parse.parse_qs(parsed.query)
+    if not qs and 'code=' in raw:
+        qs = urllib.parse.parse_qs(raw.lstrip('?'))
+    codes = qs.get('code') or []
+    if codes and codes[0].strip():
+        print(codes[0].strip())
+    sys.exit(0)
+if re.fullmatch(r'[A-Za-z0-9._~-]+', raw):
+    print(raw)
+PY
+}
+
+authenticate_gog_isolated() {
+	mkdir -p "$GOG_CFG_DIR"
+	printf '\n  %sGOG Authentication (isolated temporary session)%s\n' "$BOLD" "$RESET"
+	printf '    • Opens GOG'\''s official login page in your browser — this script never asks for\n'
+	printf '      your GOG password in Terminal and never reads Heroic or other app sessions.\n'
+	printf '    • After signing in, your browser reaches a blank "on_login_success" page.\n'
+	printf '    • Copy that full URL from your browser address bar and paste it here.\n'
+	printf '    • Credentials stay only in a private temporary file and are deleted on exit.\n\n'
+	printf '    Login URL:\n      %s\n\n' "$GOG_AUTH_URL"
+
+	local open_reply="" raw_auth="" auth_code="" gog_auth_ok="no" retry_choice=""
+	local auth_out="$TMP/gog-auth-out.json"
+	local auth_log="$TMP/gog-auth.log"
+	while true; do
+		printf '  %s?%s Open GOG login page in your default browser? [Y/n] ' "$CYAN" "$RESET"
+		read -r open_reply || die "GOG login aborted."
+		case "$open_reply" in
+			""|[yY]|[yY][eE][sS]|[sS])
+				open "$GOG_AUTH_URL" >/dev/null 2>&1 || true
+				;;
+			[qQ]|[qQ][uU][iI][tT])
+				die "GOG download aborted."
+				;;
+		esac
+
+		while true; do
+			printf '  %s?%s Paste the on_login_success URL (or q to quit): ' "$CYAN" "$RESET"
+			read -r raw_auth || die "GOG login aborted."
+			case "$raw_auth" in
+				[qQ]|[qQ][uU][iI][tT]) die "GOG download aborted." ;;
+			esac
+			auth_code="$(extract_gog_auth_code "$raw_auth")"
+			if [ -n "$auth_code" ]; then
+				break
+			fi
+			warn "Could not find an authorization code in what you pasted. Copy the full https://embed.gog.com/on_login_success?... URL."
+		done
+
+		rm -f "$GOG_AUTH_FILE" "$auth_out" "$auth_log"
+		GOGDL_CONFIG_PATH="$GOG_CFG_DIR" "$GOGDL_BIN" \
+			--auth-config-path "$GOG_AUTH_FILE" \
+			auth --code "$auth_code" >"$auth_out" 2>"$auth_log" || true
+
+		gog_auth_ok="$(python3 - "$auth_out" "$GOG_AUTH_FILE" <<'PY'
+import json, sys
+out_path, cfg_path = sys.argv[1], sys.argv[2]
+try:
+    out = json.load(open(out_path))
+    if isinstance(out, dict) and out.get("error"):
+        print("no")
+        sys.exit(0)
+except Exception:
+    pass
+try:
+    cfg = json.load(open(cfg_path))
+    tok = (cfg.get("46899977096215655") or {}).get("access_token")
+    print("yes" if isinstance(tok, str) and len(tok) > 0 else "no")
+except Exception:
+    print("no")
+PY
+)"
+		rm -f "$auth_out"
+		chmod 600 "$GOG_AUTH_FILE" 2>/dev/null || true
+
+		if [ "$gog_auth_ok" = yes ]; then
+			rm -f "$auth_log"
+			ok "Authenticated GOG session in isolated temp storage"
+			return 0
+		fi
+
+		warn "GOG login failed (invalid/expired code or network error)."
+		if [ -s "$auth_log" ]; then
+			sed 's/^/    /' "$auth_log" >&2 || true
+		fi
+		while true; do
+			printf '  %s?%s [r] Try again  [q] Quit [r]: ' "$CYAN" "$RESET"
+			read -r retry_choice || die "GOG login aborted."
+			case "$retry_choice" in
+				""|[rR]) break ;;
+				[qQ]|[qQ][uU][iI][tT]) die "GOG download aborted." ;;
+				*) warn "Please enter r or q." ;;
+			esac
+		done
+	done
+}
+
+find_gogdl_game_dir() {
+	local game="$1" base="$2" d exe esm
+	if [ "$game" = fallout3 ]; then
+		exe="Fallout3.exe"; esm="Data/Fallout3.esm"
+	else
+		exe="FalloutNV.exe"; esm="Data/FalloutNV.esm"
+	fi
+	if [ -f "$base/$exe" ] && [ -f "$base/$esm" ]; then
+		echo "$base"; return 0
+	fi
+	shopt -s nullglob
+	for d in "$base"/*; do
+		if [ -d "$d" ] && [ -f "$d/$exe" ] && [ -f "$d/$esm" ]; then
+			shopt -u nullglob
+			echo "$d"; return 0
+		fi
+	done
+	shopt -u nullglob
+	return 1
+}
+
+download_game_via_gogdl() {
+	select_gog_download_target
+	ensure_gogdl
+	authenticate_gog_isolated
+
+	local download_dir gog_rc found_dir retry_choice
+	while true; do
+		download_dir="$CACHE_ROOT/gog-download/$GOG_DL_ID"
+		mkdir -p "$download_dir"
+		if [ ! -f "$download_dir/.gogdl-complete" ] && [ -n "$(ls -A "$download_dir" 2>/dev/null)" ]; then
+			printf '  %sNote:%s Resuming/verifying previous download in %s\n' "$DIM" "$RESET" "$download_dir"
+		fi
+		rm -f "$download_dir/.gogdl-complete"
+
+		printf '\n  %sDownloading %s via gogdl (GOG ID %s)%s\n' \
+			"$BOLD" "$(game_display_name "$GOG_DL_GAME")" "$GOG_DL_ID" "$RESET"
+		printf '    • Files download into temporary cache and are moved into the app bundle.\n\n'
+
+		gog_rc=0
+		GOGDL_CONFIG_PATH="$GOG_CFG_DIR" "$GOGDL_BIN" \
+			--auth-config-path "$GOG_AUTH_FILE" \
+			download "$GOG_DL_ID" \
+			--platform windows \
+			--lang en \
+			--with-dlcs \
+			--path "$download_dir" || gog_rc=$?
+		printf '\n'
+
+		found_dir="$(find_gogdl_game_dir "$GOG_DL_GAME" "$download_dir" || true)"
+		if [ "$gog_rc" -eq 0 ] && [ -n "$found_dir" ]; then
+			touch "$download_dir/.gogdl-complete"
+			add_match "$GOG_DL_GAME" dir "$found_dir"
+			ok "Downloaded $(game_display_name "$GOG_DL_GAME") (GOG ID $GOG_DL_ID) via gogdl"
+			break
+		fi
+
+		if [ -n "$found_dir" ]; then
+			warn "gogdl exited with code $gog_rc; the download may be incomplete (retrying will resume missing chunks)."
+		else
+			warn "gogdl finished (exit $gog_rc) without the expected game files in $download_dir."
+			printf '    Common causes: your GOG account does not own this title, expired auth session, disk space, or network error.\n'
+		fi
+
+		while true; do
+			printf '  %s?%s [r] Retry  [l] Re-authenticate  [c] Change game  [q] Quit [r]: ' "$CYAN" "$RESET"
+			read -r retry_choice || die "Aborted."
+			case "$retry_choice" in
+				""|[rR])
+					break
+					;;
+				[lL])
+					authenticate_gog_isolated
+					break
+					;;
+				[cC])
+					select_gog_download_target
+					break
+					;;
+				[qQ]|[qQ][uU][iI][tT])
+					die "GOG download aborted."
+					;;
+				*)
+					warn "Please enter r, l, c, or q."
+					;;
+			esac
+		done
+	done
+}
+
+download_game_interactive() {
+	if [ "$GAME_ID" = skyrim ]; then
+		download_game_via_steamcmd
+		return
+	fi
+	local store_choice
+	while true; do
+		if [ -n "$GAME_ID" ]; then
+			printf '\n%sWhich store do you own %s on?%s\n' "$BOLD" "$(game_display_name "$GAME_ID")" "$RESET"
+			printf '  %s1)%s Steam (via steamcmd — installs steamcmd if needed)\n' "$GOLD" "$RESET"
+			printf '  %s2)%s GOG (via gogdl — isolated temporary browser login)\n' "$GOLD" "$RESET"
+		else
+			printf '\n%sWhich store would you like to download from?%s\n' "$BOLD" "$RESET"
+			printf '  %s1)%s Steam (Fallout 3, Fallout: New Vegas, or Skyrim — via steamcmd)\n' "$GOLD" "$RESET"
+			printf '  %s2)%s GOG (Fallout 3 GOTY or Fallout: New Vegas — via gogdl)\n' "$GOLD" "$RESET"
+		fi
+		printf '  %s3)%s Quit\n' "$GOLD" "$RESET"
+		printf '  Select [1-3]: '
+		read -r store_choice || die "Aborted."
+		case "$store_choice" in
+			1) download_game_via_steamcmd; return ;;
+			2) download_game_via_gogdl; return ;;
+			3|[qQ]|[qQ][uU][iI][tT]) die "Download aborted." ;;
+			*) warn "Please enter 1, 2, or 3." ;;
+		esac
+	done
+}
+
+if [ "$DOWNLOAD_MODE" = prompt ]; then
+	download_game_interactive
+elif [ "$DOWNLOAD_MODE" = steam ]; then
 	download_game_via_steamcmd
+elif [ "$DOWNLOAD_MODE" = gog ]; then
+	download_game_via_gogdl
 elif [ -n "$GAME_ARG" ]; then
 	scan_explicit_path "$GAME_ARG" fatal
 else
@@ -759,6 +1099,14 @@ else
 		for steam_dl in "$CACHE_ROOT/steam-download/22380" "$CACHE_ROOT/steam-download/22490"; do
 			[ -f "$steam_dl/.steamcmd-complete" ] && CANDIDATES+=("$steam_dl")
 		done
+		if [ -f "$CACHE_ROOT/gog-download/$GOG_FNV_ID/.gogdl-complete" ]; then
+			shopt -s nullglob
+			CANDIDATES+=(
+				"$CACHE_ROOT/gog-download/$GOG_FNV_ID"
+				"$CACHE_ROOT/gog-download/$GOG_FNV_ID"/*
+			)
+			shopt -u nullglob
+		fi
 		shopt -s nullglob
 		CANDIDATES+=(
 			"$HOME"/Downloads/depots/22380/*
@@ -788,6 +1136,14 @@ else
 		for steam_dl in "$CACHE_ROOT/steam-download/22370" "$CACHE_ROOT/steam-download/22300"; do
 			[ -f "$steam_dl/.steamcmd-complete" ] && CANDIDATES+=("$steam_dl")
 		done
+		if [ -f "$CACHE_ROOT/gog-download/$GOG_FO3_ID/.gogdl-complete" ]; then
+			shopt -s nullglob
+			CANDIDATES+=(
+				"$CACHE_ROOT/gog-download/$GOG_FO3_ID"
+				"$CACHE_ROOT/gog-download/$GOG_FO3_ID"/*
+			)
+			shopt -u nullglob
+		fi
 		shopt -s nullglob
 		CANDIDATES+=(
 			"$HOME"/Downloads/depots/22370/*
@@ -827,8 +1183,10 @@ fi
 if [ ${#MATCHES[@]} -eq 0 ]; then
 	if [ ! -t 0 ]; then
 		die "Game files or GOG installer not found (Fallout: New Vegas, Fallout 3, or Skyrim 32-bit LE)." \
-			"Run interactively to download from Steam via steamcmd, or pass the path to your GOG setup_*.exe / game folder:" \
+			"Run interactively to download from Steam or GOG, or pass the path to your GOG setup_*.exe / game folder:" \
 			"  ./quick-install.sh --download" \
+			"  ./quick-install.sh --download-steam" \
+			"  ./quick-install.sh --download-gog" \
 			"  ./quick-install.sh ~/Downloads/setup_fallout_3_*.exe" \
 			"  ./quick-install.sh ~/Downloads/\"Fallout New Vegas\"" \
 			"  ./quick-install.sh \"\$HOME/Library/Application Support/Steam/steamapps/common/Skyrim\""
@@ -837,33 +1195,66 @@ if [ ${#MATCHES[@]} -eq 0 ]; then
 	while [ ${#MATCHES[@]} -eq 0 ]; do
 		printf '\n%sNo local game files or GOG installers were found.%s\n' "$BOLD" "$RESET"
 		printf 'How would you like to provide your copy?\n'
-		printf '  %s1)%s Download from Steam (via steamcmd — installs steamcmd if needed)\n' "$GOLD" "$RESET"
-		printf '  %s2)%s Enter or drag-and-drop a game folder, executable, or GOG setup_*.exe\n' "$GOLD" "$RESET"
-		printf '  %s3)%s Quit\n' "$GOLD" "$RESET"
-		printf '  Select [1-3]: '
-		read -r REPLY || die "Aborted."
-		case "$REPLY" in
-			1)
-				download_game_via_steamcmd
-				;;
-			2)
-				printf '  %s?%s Drag and drop folder, .exe, or .app here (or type back): ' "$CYAN" "$RESET"
-				read -r USER_PATH || die "Aborted."
-				case "$USER_PATH" in
-					""|back|BACK|q|Q) continue ;;
-				esac
-				RESOLVED_INPUT="$(resolve_user_input_path "$USER_PATH")"
-				[ -n "$RESOLVED_INPUT" ] && scan_explicit_path "$RESOLVED_INPUT" interactive || true
-				;;
-			3|[qQ]|[qQ][uU][iI][tT])
-				printf '\n  No problem. To use GOG (Fallout), put setup_fallout_*.exe and its .bin parts in ~/Downloads/ and re-run ./quick-install.sh.\n'
-				printf '  To download any supported game from Steam next time, run ./quick-install.sh --download.\n\n'
-				exit 0
-				;;
-			*)
-				warn "Please enter 1, 2, or 3."
-				;;
-		esac
+		if [ "$GAME_ID" = skyrim ]; then
+			printf '  %s1)%s Download from Steam (via steamcmd — installs steamcmd if needed)\n' "$GOLD" "$RESET"
+			printf '  %s2)%s Enter or drag-and-drop a Skyrim folder, TESV.exe, or Skyrim.app\n' "$GOLD" "$RESET"
+			printf '  %s3)%s Quit\n' "$GOLD" "$RESET"
+			printf '  Select [1-3]: '
+			read -r REPLY || die "Aborted."
+			case "$REPLY" in
+				1)
+					download_game_via_steamcmd
+					;;
+				2)
+					printf '  %s?%s Drag and drop folder, .exe, or .app here (or type back): ' "$CYAN" "$RESET"
+					read -r USER_PATH || die "Aborted."
+					case "$USER_PATH" in
+						""|back|BACK|q|Q) continue ;;
+					esac
+					RESOLVED_INPUT="$(resolve_user_input_path "$USER_PATH")"
+					[ -n "$RESOLVED_INPUT" ] && scan_explicit_path "$RESOLVED_INPUT" interactive || true
+					;;
+				3|[qQ]|[qQ][uU][iI][tT])
+					printf '\n  No problem. To download Skyrim from Steam next time, run ./quick-install.sh --download-steam --game skyrim.\n\n'
+					exit 0
+					;;
+				*)
+					warn "Please enter 1, 2, or 3."
+					;;
+			esac
+		else
+			printf '  %s1)%s Download from Steam (Fallout 3, Fallout: New Vegas, or Skyrim — via steamcmd)\n' "$GOLD" "$RESET"
+			printf '  %s2)%s Download from GOG (Fallout 3 GOTY or Fallout: New Vegas — via gogdl)\n' "$GOLD" "$RESET"
+			printf '  %s3)%s Enter or drag-and-drop a game folder, executable, or GOG setup_*.exe\n' "$GOLD" "$RESET"
+			printf '  %s4)%s Quit\n' "$GOLD" "$RESET"
+			printf '  Select [1-4]: '
+			read -r REPLY || die "Aborted."
+			case "$REPLY" in
+				1)
+					download_game_via_steamcmd
+					;;
+				2)
+					download_game_via_gogdl
+					;;
+				3)
+					printf '  %s?%s Drag and drop folder, .exe, or .app here (or type back): ' "$CYAN" "$RESET"
+					read -r USER_PATH || die "Aborted."
+					case "$USER_PATH" in
+						""|back|BACK|q|Q) continue ;;
+					esac
+					RESOLVED_INPUT="$(resolve_user_input_path "$USER_PATH")"
+					[ -n "$RESOLVED_INPUT" ] && scan_explicit_path "$RESOLVED_INPUT" interactive || true
+					;;
+				4|[qQ]|[qQ][uU][iI][tT])
+					printf '\n  No problem. To use an offline GOG installer, put setup_fallout_*.exe and its .bin parts in ~/Downloads/ and re-run.\n'
+					printf '  To download directly from Steam or GOG next time, run ./quick-install.sh --download.\n\n'
+					exit 0
+					;;
+				*)
+					warn "Please enter 1, 2, 3, or 4."
+					;;
+			esac
+		fi
 	done
 fi
 
@@ -1005,8 +1396,9 @@ unpack_steam_drm() {
 		local zip_path="$TMP/steamless.zip"
 		rm -rf "$steamless_dir"
 		mkdir -p "$steamless_dir"
-		run_task "Downloading official Steamless ($STEAMLESS_VERSION)" \
-			curl -fsSL "$STEAMLESS_URL" -o "$zip_path"
+		run_logged_task "Downloading official Steamless ($STEAMLESS_VERSION)" "$TMP/download.log" \
+			curl -fsSL "$STEAMLESS_URL" -o "$zip_path" \
+			|| die "Failed to download Steamless ($STEAMLESS_VERSION)."
 		local zip_sha
 		zip_sha="$(shasum -a 256 "$zip_path" | awk '{print $1}')"
 		if [ "$zip_sha" != "$STEAMLESS_ZIP_SHA256" ]; then
@@ -1015,8 +1407,9 @@ unpack_steam_drm() {
 				"Expected: $STEAMLESS_ZIP_SHA256" \
 				"Got:      $zip_sha"
 		fi
-		run_task "Extracting Steamless ($STEAMLESS_VERSION)" \
-			unzip -qo "$zip_path" -d "$steamless_dir"
+		run_logged_task "Extracting Steamless ($STEAMLESS_VERSION)" "$TMP/unzip.log" \
+			unzip -qo "$zip_path" -d "$steamless_dir" \
+			|| die "Failed to extract Steamless ($STEAMLESS_VERSION)."
 		[ -f "$steamless_dir/Steamless.CLI.exe" ] || die "Steamless.CLI.exe missing after extraction."
 	else
 		ok "Using cached Steamless ($STEAMLESS_VERSION)"
@@ -1225,16 +1618,18 @@ else
 	if [ -n "$SYM_DIR" ] && [ -f "$SYM_DIR/functions.tsv" ]; then
 		ok "Using precomputed function & jump-table metadata ($SYM_DIR)"
 		rm -rf "$GHIDRA_PROJ/$GHIDRA_PROJ_NAME.gpr" "$GHIDRA_PROJ/$GHIDRA_PROJ_NAME.rep"
-		run_task "Disassembling & exporting P-code (~1 min, no Ghidra auto-analysis)" \
+		run_logged_task "Disassembling & exporting P-code (~1 min, no Ghidra auto-analysis)" "$TRANS_WORK/ghidra-console.log" \
 			env GHIDRA_HEADLESS_MAXMEM=4G "$HEADLESS" "$GHIDRA_PROJ" "$GHIDRA_PROJ_NAME" \
 			-import "$EXE_PATH" -noanalysis \
 			-scriptPath "$SCRIPTS" \
 			-postScript ApplyMetadataAndDump.java "$SYM_DIR" "$JSONL" \
-			-log "$GHIDRA_LOG" -scriptlog "$TRANS_WORK/script.log"
+			-log "$GHIDRA_LOG" -scriptlog "$TRANS_WORK/script.log" \
+			|| die "Ghidra P-code export failed (see $TRANS_WORK/ghidra-console.log)"
 
-		run_task "Emitting C translation units (~3 min)" \
+		run_logged_task "Emitting C translation units (~3 min)" "$TRANS_WORK/emit.log" \
 			python3 "$SCRIPT_DIR/tools/translate/emit.py" "$JSONL" "$GEN_DIR" \
-			--extra "$SYM_DIR/extra_entries.json"
+			--extra "$SYM_DIR/extra_entries.json" \
+			|| die "C translation failed (see $TRANS_WORK/emit.log)"
 	else
 		if [ -z "${GHIDRA_HEADLESS_MAXMEM:-}" ]; then
 			MEM_GB=$(( $(sysctl -n hw.memsize) / 1073741824 ))
@@ -1250,23 +1645,25 @@ else
 		if [ ! -f "$GHIDRA_PROJ/ghidra.done" ]; then
 			rm -rf "$GHIDRA_PROJ/$GHIDRA_PROJ_NAME.gpr" "$GHIDRA_PROJ/$GHIDRA_PROJ_NAME.rep"
 			printf '  %sRunning Ghidra import & auto-analysis (heap %s, first run only)...%s\n' "$DIM" "$GHIDRA_HEADLESS_MAXMEM" "$RESET"
-			run_task "Ghidra import & analysis ($EXE_NAME)" \
+			run_logged_task "Ghidra import & analysis ($EXE_NAME)" "$TRANS_WORK/ghidra-console.log" \
 				"$HEADLESS" "$GHIDRA_PROJ" "$GHIDRA_PROJ_NAME" -import "$EXE_PATH" \
-				-log "$GHIDRA_LOG" -scriptlog "$TRANS_WORK/script.log"
+				-log "$GHIDRA_LOG" -scriptlog "$TRANS_WORK/script.log" \
+				|| die "Ghidra import & analysis failed (see $TRANS_WORK/ghidra-console.log)"
 			touch "$GHIDRA_PROJ/ghidra.done"
 		else
 			ok "Reusing existing Ghidra project in $GHIDRA_PROJ"
 		fi
 
-		run_task "Repairing functions, jump tables & CRT tables (pass 1/2)" \
+		run_logged_task "Repairing functions, jump tables & CRT tables (pass 1/2)" "$TRANS_WORK/ghidra-console.log" \
 			"$HEADLESS" "$GHIDRA_PROJ" "$GHIDRA_PROJ_NAME" -process "$EXE_NAME" -noanalysis \
 			-scriptPath "$SCRIPTS" \
 			-postScript FixNoReturn.java \
 			-postScript ResolveJumpTables.java \
 			-postScript FixEntries.java "$PASS_OUT" \
-			-log "$GHIDRA_LOG"
+			-log "$GHIDRA_LOG" \
+			|| die "Ghidra pass 1/2 failed (see $TRANS_WORK/ghidra-console.log)"
 
-		if ! run_task "Repairing functions, CRT operation tables & exporting P-code (pass 2/2)" \
+		if ! run_logged_task "Repairing functions, CRT operation tables & exporting P-code (pass 2/2)" "$TRANS_WORK/ghidra-console.log" \
 			"$HEADLESS" "$GHIDRA_PROJ" "$GHIDRA_PROJ_NAME" -process "$EXE_NAME" -noanalysis \
 			-scriptPath "$SCRIPTS" \
 			-postScript FixNoReturn.java \
@@ -1277,14 +1674,15 @@ else
 			-log "$GHIDRA_LOG"; then
 			warn "ResolveCrtOperationTables did not apply; retrying pass 2 without CRT table recovery"
 			rm -f "$PASS_OUT/crt-report.json" "$PASS_OUT/crt-extra.json"
-			run_task "Repairing functions & exporting P-code (pass 2/2 fallback)" \
+			run_logged_task "Repairing functions & exporting P-code (pass 2/2 fallback)" "$TRANS_WORK/ghidra-console.log" \
 				"$HEADLESS" "$GHIDRA_PROJ" "$GHIDRA_PROJ_NAME" -process "$EXE_NAME" -noanalysis \
 				-scriptPath "$SCRIPTS" \
 				-postScript FixNoReturn.java \
 				-postScript ResolveJumpTables.java \
 				-postScript FixEntries.java "$PASS_OUT" \
 				-postScript DumpPcode.java "$JSONL" all \
-				-log "$GHIDRA_LOG"
+				-log "$GHIDRA_LOG" \
+				|| die "Ghidra pass 2/2 failed (see $TRANS_WORK/ghidra-console.log)"
 		fi
 
 		python3 - "$PASS_OUT/extra_entries.json" "$PASS_OUT/crt-extra.json" "$PASS_OUT/merged-extra-entries.json" <<'PY'
@@ -1303,9 +1701,10 @@ for path in sys.argv[1:3]:
 json.dump(merged, open(sys.argv[3], 'w'))
 PY
 
-		run_task "Emitting C translation units" \
+		run_logged_task "Emitting C translation units" "$TRANS_WORK/emit.log" \
 			python3 "$SCRIPT_DIR/tools/translate/emit.py" "$JSONL" "$GEN_DIR" \
-			--extra "$PASS_OUT/merged-extra-entries.json"
+			--extra "$PASS_OUT/merged-extra-entries.json" \
+			|| die "C translation failed (see $TRANS_WORK/emit.log)"
 	fi
 
 	if [ "$KEEP_GHIDRA" = no ]; then
@@ -1351,7 +1750,7 @@ if [ "$STEAM_ELIGIBLE" = yes ]; then
 	if [ ! -f "$SW_DYLIB" ]; then
 		SW_PKG="$TMP/Steamworks.NET_20.1.0.unitypackage"
 		SW_EXTRACT="$TMP/steamworks-extract"
-		if run_task "Downloading Steamworks.NET 20.1.0 (Valve libsteam_api.dylib)" \
+		if run_logged_task "Downloading Steamworks.NET 20.1.0 (Valve libsteam_api.dylib)" "$TMP/download.log" \
 			curl -fsSL --retry 3 "$STEAMWORKS_URL" -o "$SW_PKG"; then
 			SW_GOT="$(shasum -a 256 "$SW_PKG" | awk '{print $1}')"
 			if [ "$SW_GOT" = "$STEAMWORKS_SHA256" ]; then
@@ -1467,7 +1866,7 @@ if [ -n "$VIDEO_DIR" ]; then
 				fi
 			done
 		}
-		run_task "Converting ${#BIKS[@]} Bink movie(s) to MP4 for AVFoundation" convert_movies
+		run_logged_task "Converting ${#BIKS[@]} Bink movie(s) to MP4 for AVFoundation" "$TMP/ffmpeg.log" convert_movies || true
 	fi
 fi
 
@@ -1486,7 +1885,7 @@ sign_bundle() {
 	xattr -cr "$APP" 2>/dev/null || true
 	codesign --force --deep --sign - "$APP"
 }
-run_task "Ad-hoc signing $APP_NAME.app" sign_bundle || die "Code signing failed"
+run_logged_task "Ad-hoc signing $APP_NAME.app" "$TMP/codesign.log" sign_bundle || die "Code signing failed"
 
 is_protected_dir() {
 	local p="${1%/}"
@@ -1554,7 +1953,12 @@ cleanup_source_leftovers() {
 				rmdir "$(dirname "$src")" 2>/dev/null || true
 				rmdir "$(dirname "$(dirname "$src")")" 2>/dev/null || true
 				;;
-			*/steam-download/*)
+			*/gog-download/*/*)
+				rm -f "$(dirname "$src")/.gogdl-complete"
+				rmdir "$(dirname "$src")" 2>/dev/null || true
+				rmdir "$(dirname "$(dirname "$src")")" 2>/dev/null || true
+				;;
+			*/steam-download/*|*/gog-download/*)
 				rmdir "$(dirname "$src")" 2>/dev/null || true
 				;;
 		esac
@@ -1572,7 +1976,7 @@ cleanup_build_cache() {
 
 print_post_install_notes() {
 	local brew_cmd="brew" pkg
-	local -a UNINSTALL_BREW=()
+	UNINSTALL_BREW=()
 	if [ "$BREW_SELF_INSTALLED" = yes ] || [ "$BREW_ADDED_TO_PATH" = yes ]; then
 		brew_cmd="/opt/homebrew/bin/brew"
 	fi
@@ -1640,12 +2044,17 @@ mv "$APP" "$STAGE/$APP_NAME.app"
 ln -s /Applications "$STAGE/Applications"
 TMPDMG="$TMP/rw.dmg"
 
-run_task "Creating disk image" hdiutil create -srcfolder "$STAGE" -volname "$VOLNAME" -fs HFS+ -format UDRW "$TMPDMG" >/dev/null
+run_logged_task "Creating disk image" "$TMP/hdiutil.log" hdiutil create -srcfolder "$STAGE" -volname "$VOLNAME" -fs HFS+ -format UDRW "$TMPDMG" \
+	|| die "Creating disk image failed"
 rm -f "$DEST_DIR/$APP_NAME.dmg"
-run_task "Compressing disk image" hdiutil convert "$TMPDMG" -format UDZO -imagekey zlib-level=9 -o "$DEST_DIR/$APP_NAME.dmg" >/dev/null
+run_logged_task "Compressing disk image" "$TMP/hdiutil.log" hdiutil convert "$TMPDMG" -format UDZO -imagekey zlib-level=9 -o "$DEST_DIR/$APP_NAME.dmg" \
+	|| die "Compressing disk image failed"
 GDATA=""
 cleanup_source_leftovers
 cleanup_build_cache
 ok "Created $DEST_DIR/$APP_NAME.dmg"
 print_post_install_notes
 open -R "$DEST_DIR/$APP_NAME.dmg" 2>/dev/null || true
+}
+
+main "$@"
