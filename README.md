@@ -8,16 +8,21 @@ Both games are translated by the same recompiler and installed by the same `quic
 
 **What you need upfront:**
 1. An **Apple Silicon Mac** (M1 or newer) running **macOS 14 (Sonoma)** or later.
-2. **Apple Command Line Tools** (`xcode-select --install`) and **[Homebrew](https://brew.sh/)** — `quick-install.sh` automatically installs every other build tool it needs (`ghidra`, `unicorn`, `cmake`, `ffmpeg`, plus `innoextract` for GOG installers or `mono` for Steam DRM) and none of them are required to play once the `.app` is built (see [Notes on Cleanup](#notes-on-cleanup)).
-3. **Your own PC copy** of Fallout 3 GOTY or Fallout: New Vegas:
-   - **GOG:** download the offline backup installer (`setup_fallout_*.exe` + `.bin` files) into `~/Downloads/`. No manual extraction needed.
-   - **Steam:** download the Windows game files via `steamcmd` (see [Obtaining the Windows Game Files on macOS](#obtaining-the-windows-game-files-on-macos)).
+2. **Your own PC copy** of Fallout 3 GOTY or Fallout: New Vegas (Steam or GOG).
+   - **GOG shortcut:** download the offline backup installer (`setup_fallout_*.exe` + `.bin` files) into `~/Downloads/`.
+   - **Steam:** no manual pre-download needed — if no local copy is found, `./quick-install.sh` offers to install `steamcmd` and download your game directly from Steam (or run `./quick-install.sh --download`).
 
 **Build & install:**
 
 ```sh
 ./quick-install.sh
 ```
+
+`quick-install.sh` guides you through the rest interactively:
+- If **Apple Command Line Tools** are missing, it offers to launch `xcode-select --install` and wait until finished.
+- If **[Homebrew](https://brew.sh/)** is missing, it explains where Homebrew lives (`/opt/homebrew`) and that removing it later requires its official uninstall script, then asks for confirmation before installing it.
+- It automatically installs the temporary build/download tools it needs (`ghidra`, `unicorn`, `cmake`, `ffmpeg`, plus `steamcmd`, `innoextract`, or `mono` only when needed) — none are required to play once the `.app` is built (see [Notes on Cleanup](#notes-on-cleanup)).
+- If no local game folder or GOG installer is found, it lets you **download from Steam via `steamcmd`** or **enter / drag-and-drop** a game folder or `setup_*.exe` installer.
 
 The finished app is placed in `~/Applications/Fallout 3.app` or `~/Applications/Fallout New Vegas.app`.
 
@@ -55,7 +60,8 @@ This repository adapts **[FNV-iOS-Shim](https://github.com/arjuk95-dot/FNV-iOS-S
   * Precomputed function and jump-table metadata for the **GOG and Steam** builds of both games plus `tools/ghidra/ApplyMetadataAndDump.java` cut the Ghidra step down to **~1 min** P-code export + **~3 min** C emission. `tools/ghidra/ExportSymbols.java` exports a new map from an analysed executable, so another build can be added without redoing the analysis on every install. For DRM-free executables outside the precomputed set, the full Ghidra pipeline (`FixNoReturn.java`, `ResolveJumpTables.java`, `FixEntries.java`, `DumpPcode.java`) remains available automatically as a fallback.
 * **One-command installer & packager (`quick-install.sh`):**
   * Auto-detects **both games** across common locations (GOG offline `setup_fallout_*.exe` installers, Steam, SteamCMD, DepotDownloader, previously extracted GOG folders, `~/Downloads`, `~/Games`, or an existing `.app`), scans every candidate instead of stopping at the first hit, and presents a numbered menu when more than one installation is present — for example *Fallout 3: Game of the Year Edition (GOG installer)* and *Fallout: New Vegas (Steam)*. `--game fnv|fallout3` restricts the search to one game.
-  * Extracts GOG offline installers directly via `innoextract --exclude-temp` into a temporary directory (installed via Homebrew on demand, skipping ~350 MB of Windows redistributables), checks for SteamStub `.bind` DRM (offering to back up the executable to `.exe.og` and strip the DRM using official Steamless CLI + Mono on demand), verifies the executable SHA-256, installs missing Homebrew dependencies (`ghidra`, `unicorn`, `cmake`, `ffmpeg`, plus `innoextract`/`mono` only when needed), caches codecs/objects/translations under `~/Library/Caches/fnv-macos/`, moves game data into `<App>.app/Contents/Resources/GameData/`, converts `.bik` cutscenes to `.mp4` via `ffmpeg`, cleans up leftover Windows source files and Steam `appmanifest_<appid>.acf`, ad-hoc signs the bundle, and optionally wraps it in a `.dmg` (`--dmg`).
+  * When run interactively without prerequisites or local files, offers to launch `xcode-select --install`, asks confirmation (with `/opt/homebrew` and official uninstall notice) before installing Homebrew if missing, and offers to install `steamcmd` and download your Steam copy (also directly via `--download`) or accept a dragged-and-dropped folder / GOG `setup_*.exe` path.
+  * Extracts GOG offline installers directly via `innoextract --exclude-temp` into a temporary directory (installed via Homebrew on demand, skipping ~350 MB of Windows redistributables), checks for SteamStub `.bind` DRM (offering to back up the executable to `.exe.og` and strip the DRM using official Steamless CLI + Mono on demand), verifies the executable SHA-256, installs missing Homebrew dependencies (`ghidra`, `unicorn`, `cmake`, `ffmpeg`, plus `steamcmd`/`innoextract`/`mono` only when needed), caches codecs/objects/translations under `~/Library/Caches/fnv-macos/`, moves game data into `<App>.app/Contents/Resources/GameData/`, converts `.bik` cutscenes to `.mp4` via `ffmpeg`, cleans up leftover Windows source files and Steam `appmanifest_<appid>.acf`, ad-hoc signs the bundle, and optionally wraps it in a `.dmg` (`--dmg`).
 * **Additional codebase changes:**
   * **Optional Steamworks bridge & Overlay launcher (Steam builds only):** `upstream/recomp/host/shims_steam.c` loads Valve's official ARM64 `libsteam_api.dylib` (bundled only for Steam builds, omitted for GOG or `--no-steam`) to bridge `steam_api.dll` (`__thiscall` proxies for `ISteamUser`, `ISteamUtils`, `ISteamUserStats`, `ISteamApps`, and `ISteamFriends`, plus `SteamAPI_ManualDispatch_*` callbacks) for Steam achievements and status, with clean offline fallback. `macos/FNVSteamLauncher.c` starts the Mac Steam client silently (`-silent`), waits for global user login (`ConnectToGlobalUser`) before launching the game, and injects `gameoverlayrenderer.dylib` for the Metal Steam Overlay (`Shift+Tab`) and, where the game exposes Steamworks (Fallout: New Vegas), achievement notifications. The launcher takes the target executable and AppID from the build (`FalloutNewVegas`/22380 for FNV, `Fallout3`/22370 for Fallout 3).
   * **Fallout 3 specifics:** per-game title, save/log directories, and a `plugins.txt` bootstrap seeded from `Data/DLCList.txt` so all five GOTY add-ons load; xlive (Games for Windows - LIVE) stubs for the GOG build and winsock offline stubs for both; per-game `.icns` icons (`macos/Assets/AppIcon.png` for FNV, `macos/Assets/AppIcon-Fallout3.png` for Fallout 3).
@@ -104,6 +110,8 @@ Because both games are Windows-only on Steam and GOG, you can fetch or extract t
 
 ### Option 1: Steam
 
+> **Automatic SteamCMD download:** when running interactively without local game files, `./quick-install.sh` offers to install `steamcmd` and download the Windows files for you (you can also jump straight to this step with `./quick-install.sh --download`). The manual commands below remain useful as a reference or for non-default setups.
+>
 > **AppID note:** Fallout 3 is **22370** (Game of the Year Edition, includes all DLC) or **22300** (original 2008 release). Fallout: New Vegas is **22380** (standard global edition); use **22490** instead if your Steam account owns the regional PCR edition.
 
 #### Method A — `steamcmd` (recommended)
@@ -162,16 +170,23 @@ Then just run `./quick-install.sh` (or pass the `.exe` directly, e.g. `./quick-i
 
 ```sh
 # Auto-detect either game (installed folders or GOG setup_*.exe in ~/Downloads).
-# If more than one copy is found, a numbered menu asks which one to build.
+# If multiple copies are found, a menu asks which one to build; if none are found,
+# interactive mode offers to download via steamcmd or enter/drag-and-drop a path.
 ./quick-install.sh
 
-# Restrict detection to one game
+# Download from Steam via steamcmd and build immediately
+./quick-install.sh --download
+
+# Restrict detection (or --download prompt) to one game
 ./quick-install.sh --game fallout3
 ./quick-install.sh --game fnv
 
 # Or pass an explicit path (GOG setup_*.exe, game folder, or parent folder)
 ./quick-install.sh ~/Downloads/setup_fallout_3_*.exe
 ./quick-install.sh "/path/to/Fallout New Vegas"
+
+# Show all flags
+./quick-install.sh --help
 ```
 
 When more than one installation is found, the selector looks like this:
@@ -210,7 +225,7 @@ To skip the confirmation prompt when stripping SteamStub DRM, wrap the app in a 
 
 **None of the build tools are needed to play the game once the `.app` is built.** `libunicorn.a` is statically linked into the app binary, `.bik` cutscenes are already converted to `.mp4`, and Ghidra only runs during translation.
 
-`quick-install.sh` cleans up leftover source files and `~/Library/Caches/fnv-macos` automatically upon success (unless `--keep-cache` is passed), and intentionally does **not** uninstall global software from your Mac. At the end of a run, it prints the exact list of any Homebrew packages it installed together with a ready-to-copy `brew uninstall` command.
+`quick-install.sh` cleans up leftover source files and `~/Library/Caches/fnv-macos` automatically upon success (unless `--keep-cache` is passed), and intentionally does **not** uninstall global software from your Mac. At the end of a run, it prints the exact list of any Homebrew packages it installed together with a ready-to-copy `brew uninstall` command (and if `quick-install.sh` installed Homebrew itself during that run, it also prints the official Homebrew uninstall script command).
 
 If you installed build tools only for this port and want to remove them later:
 
