@@ -30,6 +30,35 @@ public class FixEntries extends GhidraScript {
         return b != null && b.isExecute() && b.isInitialized() && b.getName().equals(codeBlock);
     }
 
+    private static Set<Long> loadPeRelocLocs(Memory mem, Address base) {
+        Set<Long> locs = new HashSet<>();
+        try {
+            int peOff = mem.getInt(base.add(0x3c));
+            Address pe = base.add(peOff);
+            if (mem.getInt(pe) != 0x00004550) return locs;
+            int optOff = peOff + 24;
+            if ((mem.getShort(base.add(optOff)) & 0xffff) != 0x010b) return locs;
+            if ((mem.getInt(base.add(optOff + 92)) & 0xffffffffL) <= 5) return locs;
+            long relocRva = mem.getInt(base.add(optOff + 96 + 8 * 5)) & 0xffffffffL;
+            long relocSize = mem.getInt(base.add(optOff + 96 + 8 * 5 + 4)) & 0xffffffffL;
+            if (relocRva == 0 || relocSize == 0) return locs;
+            Address cur = base.add(relocRva), end = cur.add(relocSize);
+            long imageBase = base.getOffset();
+            while (cur.compareTo(end) < 0 && mem.contains(cur.add(7))) {
+                long pageRva = mem.getInt(cur) & 0xffffffffL;
+                long blkSize = mem.getInt(cur.add(4)) & 0xffffffffL;
+                if (blkSize < 8) break;
+                int count = (int) ((blkSize - 8) / 2);
+                for (int i = 0; i < count; i++) {
+                    int entry = mem.getShort(cur.add(8 + 2L * i)) & 0xffff;
+                    if ((entry >>> 12) == 3) locs.add(imageBase + pageRva + (entry & 0xfff));
+                }
+                cur = cur.add(blkSize);
+            }
+        } catch (Exception ignored) {}
+        return locs;
+    }
+
     @Override
     public void run() throws Exception {
         File outDir = new File(getScriptArgs().length > 0 ? getScriptArgs()[0] : ".");
@@ -38,16 +67,19 @@ public class FixEntries extends GhidraScript {
         Listing listing = currentProgram.getListing();
         FunctionManager fm = currentProgram.getFunctionManager();
         AddressSpace space = currentProgram.getAddressFactory().getDefaultAddressSpace();
+        Set<Long> relocLocs = loadPeRelocLocs(mem, currentProgram.getImageBase());
 
         TreeSet<Address> cands = new TreeSet<>();
         for (MemoryBlock b : mem.getBlocks()) {
             if (b.isExecute() || !b.isInitialized()) continue;
             byte[] buf = new byte[(int) b.getSize()];
             b.getBytes(b.getStart(), buf);
+            long blkStart = b.getStart().getOffset();
             for (int i = 0; i + 4 <= buf.length; i += 4) {
+                if (!relocLocs.isEmpty() && !relocLocs.contains(blkStart + i)) continue;
                 long v = (buf[i] & 0xffL) | (buf[i + 1] & 0xffL) << 8 | (buf[i + 2] & 0xffL) << 16 | (buf[i + 3] & 0xffL) << 24;
                 Address a = space.getAddress(v, true);
-                if (a != null && inExec(a)) cands.add(a);
+                if (a != null && inExec(a) && !relocLocs.contains(v)) cands.add(a);
             }
         }
         int dataPtrs = cands.size();
@@ -66,13 +98,25 @@ public class FixEntries extends GhidraScript {
         for (Instruction in : listing.getInstructions(true)) {
             if (in.getFlowType().isCall())
                 for (Address a : in.getFlows()) if (inExec(a)) cands.add(a);
-            // code addresses used as immediates: `push offset fn` (callbacks, EncodePointer'd fns)
-            for (int op = 0; op < in.getNumOperands(); op++) {
-                for (Object o : in.getOpObjects(op)) {
-                    if (!(o instanceof ghidra.program.model.scalar.Scalar)) continue;
-                    long v = ((ghidra.program.model.scalar.Scalar) o).getUnsignedValue();
+            if (!relocLocs.isEmpty()) {
+                if (in.getFlowType().isJump() && in.getFlowType().isComputed()) continue; // jump table base is data, cases handled by ResolveJumpTables
+                long lo = in.getMinAddress().getOffset(), hi = in.getMaxAddress().getOffset();
+                for (long r = lo; r + 3 <= hi; r++) {
+                    if (!relocLocs.contains(r)) continue;
+                    long v = mem.getInt(space.getAddress(r, true)) & 0xffffffffL;
+                    if (relocLocs.contains(v)) continue;
                     Address a = space.getAddress(v, true);
                     if (a != null && inExec(a) && cands.add(a)) imm++;
+                }
+            } else {
+                // code addresses used as immediates: `push offset fn` (callbacks, EncodePointer'd fns)
+                for (int op = 0; op < in.getNumOperands(); op++) {
+                    for (Object o : in.getOpObjects(op)) {
+                        if (!(o instanceof ghidra.program.model.scalar.Scalar)) continue;
+                        long v = ((ghidra.program.model.scalar.Scalar) o).getUnsignedValue();
+                        Address a = space.getAddress(v, true);
+                        if (a != null && inExec(a) && cands.add(a)) imm++;
+                    }
                 }
             }
         }

@@ -56,7 +56,9 @@ static void *(*p_SteamUtils_v)(void);
 static bool (*p_ISteamUser_BLoggedOn)(void *self);
 static uint32_t (*p_ISteamUtils_GetAppID)(void *self);
 static bool (*p_ISteamUserStats_RequestCurrentStats)(void *self);
+static bool (*p_ISteamUserStats_GetAchievement)(void *self, const char *name, bool *achieved);
 static bool (*p_ISteamUserStats_SetAchievement)(void *self, const char *name);
+static bool (*p_ISteamUserStats_ClearAchievement)(void *self, const char *name);
 static bool (*p_ISteamUserStats_StoreStats)(void *self);
 static bool (*p_ISteamApps_BIsDlcInstalled)(void *self, uint32_t app_id);
 static void (*p_ISteamFriends_ActivateGameOverlayToStore)(void *self, uint32_t app_id, int flag);
@@ -64,6 +66,11 @@ static void (*p_ISteamFriends_ActivateGameOverlayToStore)(void *self, uint32_t a
 typedef struct { uint32_t obj; int32_t id; } GuestCallback;
 static GuestCallback *cb_list;
 static size_t cb_count, cb_cap;
+
+static int is_flag_set(const char *name) {
+    const char *v = getenv(name);
+    return v && *v && strcmp(v, "0") != 0;
+}
 
 static int exe_dir(char *out, size_t n) {
 #ifdef __APPLE__
@@ -82,7 +89,8 @@ static int exe_dir(char *out, size_t n) {
 
 static void configure_appid(void) {
     if (getenv("SteamAppId") && *getenv("SteamAppId")) return;
-    const char *env_id = getenv("FNV_STEAM_APPID");
+    const char *env_id = getenv("SKYRIM_STEAM_APPID");
+    if (!env_id || !*env_id) env_id = getenv("FNV_STEAM_APPID");
     char buf[32] = {0};
     if (env_id && *env_id) {
         snprintf(buf, sizeof(buf), "%s", env_id);
@@ -99,7 +107,13 @@ static void configure_appid(void) {
             }
         }
     }
+#ifdef FNV_GAME_SKYRIM
+    if (!buf[0]) snprintf(buf, sizeof(buf), "72850");
+#elif defined(FNV_GAME_FALLOUT3)
+    if (!buf[0]) snprintf(buf, sizeof(buf), "22370");
+#else
     if (!buf[0]) snprintf(buf, sizeof(buf), "22380");
+#endif
     setenv("SteamAppId", buf, 0);
     setenv("SteamGameId", buf, 0);
 }
@@ -108,11 +122,12 @@ static int load_steam_dylib(void) {
     if (steam_tried_load) return steam_lib != NULL;
     steam_tried_load = 1;
 
-    const char *dis = getenv("FNV_STEAM_DISABLE");
-    if (dis && *dis && strcmp(dis, "0")) return 0;
+    if (is_flag_set("SKYRIM_STEAM_DISABLE") || is_flag_set("FNV_STEAM_DISABLE")) return 0;
+    if (is_flag_set("FNV_HEADLESS") && !is_flag_set("SKYRIM_STEAM_FORCE") && !is_flag_set("FNV_STEAM_FORCE")) return 0;
 
     char cand[PATH_MAX];
-    const char *env_path = getenv("FNV_STEAM_API_DYLIB");
+    const char *env_path = getenv("SKYRIM_STEAM_API_DYLIB");
+    if (!env_path || !*env_path) env_path = getenv("FNV_STEAM_API_DYLIB");
     if (env_path && *env_path) {
         steam_lib = dlopen(env_path, RTLD_NOW | RTLD_LOCAL);
     }
@@ -144,7 +159,9 @@ static int load_steam_dylib(void) {
     SYM(p_ISteamUser_BLoggedOn, "SteamAPI_ISteamUser_BLoggedOn");
     SYM(p_ISteamUtils_GetAppID, "SteamAPI_ISteamUtils_GetAppID");
     SYM(p_ISteamUserStats_RequestCurrentStats, "SteamAPI_ISteamUserStats_RequestCurrentStats");
+    SYM(p_ISteamUserStats_GetAchievement, "SteamAPI_ISteamUserStats_GetAchievement");
     SYM(p_ISteamUserStats_SetAchievement, "SteamAPI_ISteamUserStats_SetAchievement");
+    SYM(p_ISteamUserStats_ClearAchievement, "SteamAPI_ISteamUserStats_ClearAchievement");
     SYM(p_ISteamUserStats_StoreStats, "SteamAPI_ISteamUserStats_StoreStats");
     SYM(p_ISteamApps_BIsDlcInstalled, "SteamAPI_ISteamApps_BIsDlcInstalled");
     SYM(p_ISteamFriends_ActivateGameOverlayToStore, "SteamAPI_ISteamFriends_ActivateGameOverlayToStore");
@@ -181,10 +198,27 @@ static void m_ISteamUserStats_RequestCurrentStats(CPU *c) {
     RET(c, ok, 0);
 }
 
+static void m_ISteamUserStats_GetAchievement(CPU *c) {
+    const char *name = GSTR(ARG(c, 0));
+    uint32_t out_ptr = ARG(c, 1);
+    bool achieved = false;
+    uint32_t ok = (real_user_stats && name &&
+                   p_ISteamUserStats_GetAchievement(real_user_stats, name, &achieved)) ? 1u : 0u;
+    if (out_ptr) MEM[out_ptr] = achieved ? 1u : 0u;
+    RET(c, ok, 2);
+}
+
 static void m_ISteamUserStats_SetAchievement(CPU *c) {
     const char *name = GSTR(ARG(c, 0));
     uint32_t ok = (real_user_stats && name && p_ISteamUserStats_SetAchievement(real_user_stats, name)) ? 1u : 0u;
     fprintf(stderr, "[steam] SetAchievement(\"%s\") -> %u\n", name ? name : "", ok);
+    RET(c, ok, 1);
+}
+
+static void m_ISteamUserStats_ClearAchievement(CPU *c) {
+    const char *name = GSTR(ARG(c, 0));
+    uint32_t ok = (real_user_stats && name && p_ISteamUserStats_ClearAchievement(real_user_stats, name)) ? 1u : 0u;
+    fprintf(stderr, "[steam] ClearAchievement(\"%s\") -> %u\n", name ? name : "", ok);
     RET(c, ok, 1);
 }
 
@@ -227,7 +261,9 @@ static void init_proxies(void) {
     static const SteamSlot utils_slots[] = {{9, "GetAppID", m_ISteamUtils_GetAppID}};
     static const SteamSlot stats_slots[] = {
         {0, "RequestCurrentStats", m_ISteamUserStats_RequestCurrentStats},
+        {6, "GetAchievement", m_ISteamUserStats_GetAchievement},
         {7, "SetAchievement", m_ISteamUserStats_SetAchievement},
+        {8, "ClearAchievement", m_ISteamUserStats_ClearAchievement},
         {10, "StoreStats", m_ISteamUserStats_StoreStats},
     };
     static const SteamSlot apps_slots[] = {{7, "BIsDlcInstalled", m_ISteamApps_BIsDlcInstalled}};
@@ -235,7 +271,7 @@ static void init_proxies(void) {
 
     proxy_user = make_proxy("ISteamUser", user_slots, 1, 24);
     proxy_utils = make_proxy("ISteamUtils", utils_slots, 1, 24);
-    proxy_user_stats = make_proxy("ISteamUserStats", stats_slots, 3, 24);
+    proxy_user_stats = make_proxy("ISteamUserStats", stats_slots, 5, 24);
     proxy_apps = make_proxy("ISteamApps", apps_slots, 1, 24);
     proxy_friends = make_proxy("ISteamFriends", friends_slots, 1, 32);
 }
@@ -243,18 +279,29 @@ static void init_proxies(void) {
 // ---- Callbacks ---------------------------------------------------------------------------------
 static void deliver_callback(CPU *c, uint32_t obj, int32_t id, const void *data, int32_t size) {
     uint32_t vt = G32(obj);
+#ifdef FNV_GAME_SKYRIM
+    // MSVC places Run(void*, bool, SteamAPICall_t) [ret 0x10] at vtable[0] and the 1-arg
+    // Run(void *pvParam) [ret 0x4] at vtable[1] for CCallback<T, P, false> in TESV.exe.
+    uint32_t run_fn = G32(vt + 4);
+    if (!run_fn) run_fn = G32(vt);
+#else
     uint32_t run_fn = G32(vt);
+#endif
     if (!run_fn) return;
+
+    if (id == 331 && size >= 1 && data) {
+        fprintf(stderr, "[steam] GameOverlayActivated(active=%u)\n", ((const uint8_t *)data)[0]);
+    }
 
     // UserStatsReceived_t (1101): macOS pack(4) is 20 bytes (m_nGameID@0, m_eResult@8,
     // m_steamIDUser@12); Win32 MSVC pack(8) is 24 bytes (m_steamIDUser@16).
     uint32_t alloc_sz = (uint32_t)(size > 0 ? size : 1) + 16u;
     uint32_t buf = gmalloc(alloc_sz);
     memset(MEM + buf, 0, alloc_sz);
-    if (id == 1101 && size == 20) {
+    if (id == 1101 && size == 20 && data) {
         memcpy(MEM + buf, data, 12);
         memcpy(MEM + buf + 16, (const uint8_t *)data + 12, 8);
-    } else if (size > 0) {
+    } else if (size > 0 && data) {
         memcpy(MEM + buf, data, (size_t)size);
     }
 
@@ -308,6 +355,7 @@ SHIM(SteamAPI_Init) {
             real_user_stats = p_SteamUserStats_v();
             real_apps = p_SteamApps_v();
             real_utils = p_SteamUtils_v();
+            if (real_user_stats) p_ISteamUserStats_RequestCurrentStats(real_user_stats);
             init_proxies();
             steam_active = 1;
             uint32_t appid = real_utils ? p_ISteamUtils_GetAppID(real_utils) : 0;

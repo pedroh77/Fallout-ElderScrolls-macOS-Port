@@ -1,6 +1,6 @@
 // Files, directories, find-first/next, attributes and INI profile functions.
 // Windows paths map onto the host: '\' -> '/', a drive letter or the game's install path maps to
-// FNV_ROOT (default: the current directory, which holds Data/ and the INIs).
+// FNV_ROOT / SKYRIM_ROOT (default: the current directory, which holds Data/ and the INIs).
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -8,11 +8,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 #include "shims.h"
 
 __attribute__((weak)) const char *host_game_dir(void) { return "FalloutNV"; }
 static const char *game_dir_name(void) { return host_game_dir(); }
+void host_queue_io_apc(uint32_t fn, uint32_t err, uint32_t nbytes, uint32_t ov) __attribute__((weak));
+void host_queue_io_apc(uint32_t fn, uint32_t err, uint32_t nbytes, uint32_t ov) { (void)fn; (void)err; (void)nbytes; (void)ov; }
 
 static void a2w_write(uint32_t dst, const char *s, size_t max_chars) {
     size_t i = 0;
@@ -58,16 +61,19 @@ static void existing_path_case(const char *path,char *out,size_t n) {
 void host_path(const char *win, char *out, size_t n) {
     if (!n) return;
     if (!win) { out[0]=0; return; }
-    const char *root = getenv("FNV_ROOT");
-    const char *user_dir = getenv("FNV_USER_DIR");
+    const char *root = getenv("SKYRIM_ROOT");
+    if (!root || !root[0]) root = getenv("FNV_ROOT");
+    const char *user_dir = getenv("SKYRIM_USER_DIR");
+    if (!user_dir || !user_dir[0]) user_dir = getenv("FNV_USER_DIR");
     char tmp[1024]; size_t k = 0;
     const char *p = win;
-    if (p[0] && p[1] == ':') {                         // "C:\Games\FalloutNV\Data\x" or "C:\Games\Fallout3\Data\x" -> root + rest
+    if (p[0] && p[1] == ':') {                         // "C:\Games\{FalloutNV,Fallout3,Skyrim}\Data\x" -> root + rest
         p += 2;
         const char *game=NULL; size_t glen=0;
         for (const char *q=p;*q;q++) if (q==p||q[-1]=='\\'||q[-1]=='/') {
             if (!strncasecmp(q,"FalloutNV",9) && (!q[9]||q[9]=='\\'||q[9]=='/')) { game=q; glen=9; break; }
             if (!strncasecmp(q,"Fallout3",8) && (!q[8]||q[8]=='\\'||q[8]=='/')) { game=q; glen=8; break; }
+            if (!strncasecmp(q,"Skyrim",6) && (!q[6]||q[6]=='\\'||q[6]=='/')) { game=q; glen=6; break; }
         }
         if (game) { p=game+glen; if (*p) p++; }
         else if (*p == '\\'||*p=='/') p++;
@@ -104,6 +110,13 @@ static int trace_files(void) { static int t = -1; if (t < 0) t = getenv("FNV_TRA
 // ---- files -----------------------------------------------------------------------------------
 typedef struct { int fd; } FileObj;
 
+void file_close_obj(void *obj) {
+    FileObj *f = obj;
+    if (!f) return;
+    if (f->fd >= 0) close(f->fd);
+    free(f);
+}
+
 static uint32_t open_file(const char *winpath, uint32_t access, uint32_t disp) {
     char path[1024]; host_path(winpath, path, sizeof path);
     int fl = 0;
@@ -120,9 +133,16 @@ static uint32_t open_file(const char *winpath, uint32_t access, uint32_t disp) {
     int fd = open(path, fl, 0644);
     int error=fd<0?errno:0;
     if (trace_files()) fprintf(stderr, "[file] open %s (%s) -> %d errno=%d\n", winpath, path, fd,error);
-    if (fd < 0) { SETERR(2); return 0xFFFFFFFFu; }   // ERROR_FILE_NOT_FOUND, INVALID_HANDLE_VALUE
-    FileObj *f = malloc(sizeof *f); f->fd = fd;
-    return handle_new(H_FILE, f);
+    if (fd < 0) {
+        SETERR(error == EEXIST ? 80 : (error == EMFILE || error == ENFILE) ? 4 : (error == EACCES || error == EPERM) ? 5 : 2);
+        return 0xFFFFFFFFu;
+    }
+    FileObj *f = malloc(sizeof *f);
+    if (!f) { close(fd); SETERR(8); return 0xFFFFFFFFu; }
+    f->fd = fd;
+    uint32_t h = handle_new(H_FILE, f);
+    if (!h) { close(fd); free(f); SETERR(4); return 0xFFFFFFFFu; }
+    return h;
 }
 SHIM(CreateFileA) { RET(c, open_file(GSTR(ARG(c, 0)), ARG(c, 1), ARG(c, 4)), 7); }
 SHIM(CreateFileW) { char p[1024]; w2a(ARG(c, 0), p, sizeof p); RET(c, open_file(p, ARG(c, 1), ARG(c, 4)), 7); }
@@ -140,6 +160,51 @@ SHIM(WriteFile) {
     else { FileObj *f = fobj(h); r = f ? write(f->fd, MEM + buf, n) : -1; }
     if (put) P32(put, r > 0 ? (uint32_t)r : 0);
     RET(c, r >= 0, 5);
+}
+static uint64_t unix_to_ft(time_t t) { return ((uint64_t)t + 11644473600ull) * 10000000ull; }
+SHIM(ReadFileEx) {
+    FileObj *f = fobj(ARG(c, 0)); uint32_t buf = ARG(c, 1), n = ARG(c, 2), ov = ARG(c, 3), cb = ARG(c, 4);
+    if (!f || !ov) { SETERR(6); RET(c, 0, 5); return; }
+    off_t off = (off_t)(((uint64_t)G32(ov + 12) << 32) | G32(ov + 8));
+    ssize_t r = pread(f->fd, MEM + buf, n, off);
+    if (r < 0) { SETERR(38); RET(c, 0, 5); return; }
+    P32(ov, 0); P32(ov + 4, (uint32_t)r);
+    host_queue_io_apc(cb, 0, (uint32_t)r, ov);
+    SETERR(0); RET(c, 1, 5);
+}
+SHIM(WriteFileEx) {
+    FileObj *f = fobj(ARG(c, 0)); uint32_t buf = ARG(c, 1), n = ARG(c, 2), ov = ARG(c, 3), cb = ARG(c, 4);
+    if (!f || !ov) { SETERR(6); RET(c, 0, 5); return; }
+    off_t off = (off_t)(((uint64_t)G32(ov + 12) << 32) | G32(ov + 8));
+    ssize_t r = pwrite(f->fd, MEM + buf, n, off);
+    if (r < 0) { SETERR(29); RET(c, 0, 5); return; }
+    P32(ov, 0); P32(ov + 4, (uint32_t)r);
+    host_queue_io_apc(cb, 0, (uint32_t)r, ov);
+    SETERR(0); RET(c, 1, 5);
+}
+SHIM(PeekNamedPipe) { SETERR(6); RET(c, 0, 6); }
+SHIM(GetFileTime) {
+    FileObj *f = fobj(ARG(c, 0)); struct stat st;
+    if (!f || fstat(f->fd, &st)) { SETERR(6); RET(c, 0, 4); return; }
+    uint64_t ct = unix_to_ft(st.st_mtime), at = unix_to_ft(st.st_atime), wt = unix_to_ft(st.st_mtime);
+    if (ARG(c, 1)) memcpy(MEM + ARG(c, 1), &ct, 8);
+    if (ARG(c, 2)) memcpy(MEM + ARG(c, 2), &at, 8);
+    if (ARG(c, 3)) memcpy(MEM + ARG(c, 3), &wt, 8);
+    RET(c, 1, 4);
+}
+SHIM(SetFileTime) { RET(c, fobj(ARG(c, 0)) != NULL, 4); }
+SHIM(GetFileInformationByHandle) {
+    FileObj *f = fobj(ARG(c, 0)); uint32_t out = ARG(c, 1); struct stat st;
+    if (!f || !out || fstat(f->fd, &st)) { SETERR(6); RET(c, 0, 2); return; }
+    memset(MEM + out, 0, 52);
+    P32(out, S_ISDIR(st.st_mode) ? 0x10 : 0x80);
+    uint64_t ft = unix_to_ft(st.st_mtime);
+    memcpy(MEM + out + 4, &ft, 8); memcpy(MEM + out + 12, &ft, 8); memcpy(MEM + out + 20, &ft, 8);
+    P32(out + 28, (uint32_t)st.st_dev);
+    P32(out + 32, (uint32_t)((uint64_t)st.st_size >> 32)); P32(out + 36, (uint32_t)st.st_size);
+    P32(out + 40, (uint32_t)st.st_nlink);
+    P32(out + 44, (uint32_t)(st.st_ino >> 32)); P32(out + 48, (uint32_t)st.st_ino);
+    RET(c, 1, 2);
 }
 SHIM(GetFileSize) {
     FileObj *f = fobj(ARG(c, 0)); struct stat st;
@@ -197,21 +262,33 @@ SHIM(GetFileAttributesExW) {
     if (ARG(c, 1) != 0 || !out || stat(p, &st)) { SETERR(2); RET(c, 0, 3); return; }
     memset(MEM + out, 0, 36);
     P32(out, S_ISDIR(st.st_mode) ? 0x10 : 0x80);
-    uint64_t ft = ((uint64_t)st.st_mtime + 11644473600ull) * 10000000ull;
+    uint64_t ft = unix_to_ft(st.st_mtime);
     memcpy(MEM + out + 4, &ft, 8); memcpy(MEM + out + 12, &ft, 8); memcpy(MEM + out + 20, &ft, 8);
     P32(out + 28, (uint32_t)((uint64_t)st.st_size >> 32)); P32(out + 32, (uint32_t)st.st_size);
     RET(c, 1, 3);
 }
-SHIM(GetFileInformationByHandle) {
-    FileObj *f = fobj(ARG(c, 0)); uint32_t out = ARG(c, 1); struct stat st;
-    if (!f || !out || fstat(f->fd, &st)) { SETERR(6); RET(c, 0, 2); return; }
-    memset(MEM + out, 0, 52);
+SHIM(GetFileAttributesExA) {
+    char p[1024]; host_path(GSTR(ARG(c, 0)), p, sizeof p); uint32_t out = ARG(c, 2); struct stat st;
+    if (!out || stat(p, &st)) { SETERR(2); RET(c, 0, 3); return; }
+    memset(MEM + out, 0, 36);
     P32(out, S_ISDIR(st.st_mode) ? 0x10 : 0x80);
-    uint64_t ft = ((uint64_t)st.st_mtime + 11644473600ull) * 10000000ull;
+    uint64_t ft = unix_to_ft(st.st_mtime);
     memcpy(MEM + out + 4, &ft, 8); memcpy(MEM + out + 12, &ft, 8); memcpy(MEM + out + 20, &ft, 8);
-    P32(out + 32, (uint32_t)((uint64_t)st.st_size >> 32)); P32(out + 36, (uint32_t)st.st_size);
-    P32(out + 40, 1); P32(out + 48, (uint32_t)st.st_ino);
-    RET(c, 1, 2);
+    P32(out + 28, (uint32_t)((uint64_t)st.st_size >> 32)); P32(out + 32, (uint32_t)st.st_size);
+    RET(c, 1, 3);
+}
+SHIM(GetDiskFreeSpaceExA) {
+    char p[1024]; const char *dir = GSTR(ARG(c, 0));
+    if (dir && dir[0]) host_path(dir, p, sizeof p); else snprintf(p, sizeof p, ".");
+    struct statvfs vfs;
+    if (statvfs(p, &vfs) && statvfs(".", &vfs)) { SETERR(3); RET(c, 0, 4); return; }
+    uint64_t avail = (uint64_t)vfs.f_bavail * vfs.f_frsize;
+    uint64_t total = (uint64_t)vfs.f_blocks * vfs.f_frsize;
+    uint64_t freeb = (uint64_t)vfs.f_bfree * vfs.f_frsize;
+    if (ARG(c, 1)) memcpy(MEM + ARG(c, 1), &avail, 8);
+    if (ARG(c, 2)) memcpy(MEM + ARG(c, 2), &total, 8);
+    if (ARG(c, 3)) memcpy(MEM + ARG(c, 3), &freeb, 8);
+    RET(c, 1, 4);
 }
 SHIM(GetCurrentDirectoryA) {
     uint32_t n = ARG(c, 0), buf = ARG(c, 1);
@@ -437,10 +514,11 @@ SHIM(WritePrivateProfileStringA) {
 }
 
 SHIM_TABLE(file_shims,
-    E(CreateFileA) E(CreateFileW) E(ReadFile) E(WriteFile) E(GetFileSize) E(GetFileSizeEx) E(SetFilePointer)
+    E(CreateFileA) E(CreateFileW) E(ReadFile) E(WriteFile) E(ReadFileEx) E(WriteFileEx) E(PeekNamedPipe)
+    E(GetFileTime) E(SetFileTime) E(GetFileInformationByHandle) E(GetFileSize) E(GetFileSizeEx) E(SetFilePointer)
     E(SetFilePointerEx) E(SetEndOfFile) E(FlushFileBuffers) E(DeleteFileA) E(MoveFileA) E(MoveFileExW) E(CopyFileA)
-    E(CreateDirectoryA) E(GetFileAttributesA) E(GetFileAttributesW) E(GetFileAttributesExW) E(GetFileInformationByHandle)
-    E(GetCurrentDirectoryA) E(GetCurrentDirectoryW) E(GetFullPathNameA) E(GetFullPathNameW)
+    E(CreateDirectoryA) E(GetFileAttributesA) E(GetFileAttributesW) E(GetFileAttributesExA) E(GetFileAttributesExW)
+    E(GetDiskFreeSpaceExA) E(GetCurrentDirectoryA) E(GetCurrentDirectoryW) E(GetFullPathNameA) E(GetFullPathNameW)
     E(GetDriveTypeA) E(GetDriveTypeW)
     E(CompareFileTime) E(FindFirstFileA) E(FindFirstFileExW) E(FindNextFileA) E(FindNextFileW) E(FindClose)
     E(GetPrivateProfileStringA) E(GetPrivateProfileIntA) E(WritePrivateProfileStringA))

@@ -46,7 +46,11 @@ SHIM(inet_ntoa) {
 SHIM(gethostbyname) { wsa_last_error = 11001u /* WSAHOST_NOT_FOUND */; RET(c, 0, 1); }
 SHIM(gethostname) {
     uint32_t p = ARG(c, 0), len = ARG(c, 1);
+#ifdef FNV_GAME_SKYRIM
+    const char *nm = "skyrim-mac";
+#else
     const char *nm = "fallout-mac";
+#endif
     if (p && len > strlen(nm)) { strcpy((char *)MEM + p, nm); RET(c, 0, 2); }
     else { wsa_last_error = 10014u; RET(c, 0xFFFFFFFFu, 2); }
 }

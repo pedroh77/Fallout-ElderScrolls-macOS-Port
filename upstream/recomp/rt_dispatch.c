@@ -16,7 +16,7 @@ __attribute__((weak)) void rt_fallback(CPU *c, uint32_t a) { rt_trap(c, TRAP_NOF
 
 // O(1) dispatch: one 32-bit slot per byte of the code range holds (function index + 1).
 #define DISP_LO 0x00400000u
-#define DISP_HI 0x01000000u
+#define DISP_HI 0x01080000u
 static uint32_t *disp;
 static void disp_build(void) {
     uint32_t *t = calloc(DISP_HI - DISP_LO, sizeof *t);
@@ -41,13 +41,16 @@ static inline int fn_index(uint32_t a) {
     return -1;
 }
 
+#ifndef FNV_GAME_SKYRIM
 #include <stdio.h>
 #include <time.h>
 static int rt_trace_voice(void) { static int on = -1; if (on < 0) on = getenv("FNV_TRACE_VOICE") != NULL; return on; }
 static uint64_t rt_trace_ms(void) { static uint64_t t0; uint64_t t = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); if (!t0) t0 = t; return (t - t0) / 1000000ull; }
+#endif
 
 void rt_call(CPU *c, uint32_t a) {
     if (a >= 0xFEE00000u && a < 0xFEE10000u) { rt_import_call(c, a); return; }
+#ifndef FNV_GAME_SKYRIM
     if (__builtin_expect(a == 0x7664d0u || a == 0x766430u || a == 0x7664a0u || a == 0x766510u || a == 0x767660u, 0) && rt_trace_voice()) {
         uint32_t esp = (uint32_t)LD(c->r + 16, 4);
         if (a == 0x767660u) {
@@ -70,6 +73,7 @@ void rt_call(CPU *c, uint32_t a) {
                     (unsigned long long)rt_trace_ms(), a, ra, arg0, arg1);
         }
     }
+#endif
     int i = fn_index(a);
     if (i >= 0) { rt_fn_ptr[i](c); return; }
     rt_fallback(c, a);

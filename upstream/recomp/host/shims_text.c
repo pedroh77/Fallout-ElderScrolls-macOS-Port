@@ -130,7 +130,6 @@ SHIM(GetConsoleMode) { RET(c, 0, 2); }
 SHIM(WriteConsoleA) { fwrite(MEM + ARG(c, 1), 1, ARG(c, 2), stderr); if (ARG(c, 3)) P32(ARG(c, 3), ARG(c, 2)); RET(c, 1, 5); }
 SHIM(WriteConsoleW) { for (uint32_t i = 0; i < ARG(c, 2); i++) fputc(MEM[ARG(c, 1) + 2 * i], stderr); if (ARG(c, 3)) P32(ARG(c, 3), ARG(c, 2)); RET(c, 1, 5); }
 SHIM(ReadConsoleW) { if (ARG(c, 3)) P32(ARG(c, 3), 0); RET(c, 0, 5); }
-SHIM(PeekNamedPipe) { RET(c, 0, 6); }
 SHIM(SetStdHandle) { RET(c, 1, 2); }
 SHIM(SetEnvironmentVariableA) { RET(c, 1, 2); }
 SHIM(SetEnvironmentVariableW) { RET(c, 1, 2); }
@@ -168,6 +167,48 @@ SHIM(FileTimeToLocalFileTime) {
     uint64_t ft; memcpy(&ft, MEM + ARG(c, 0), 8);
     time_t s = (time_t)(ft / 10000000ull - 11644473600ull); struct tm t; localtime_r(&s, &t);
     ft += (uint64_t)((int64_t)t.tm_gmtoff * 10000000ll); memcpy(MEM + ARG(c, 1), &ft, 8); RET(c, 1, 2);
+}
+SHIM(LocalFileTimeToFileTime) {
+    uint64_t ft; memcpy(&ft, MEM + ARG(c, 0), 8);
+    time_t s = (time_t)(ft / 10000000ull - 11644473600ull); struct tm t; localtime_r(&s, &t);
+    ft -= (uint64_t)((int64_t)t.tm_gmtoff * 10000000ll); memcpy(MEM + ARG(c, 1), &ft, 8); RET(c, 1, 2);
+}
+static void read_or_now_tm(uint32_t st_ptr, struct tm *t) {
+    if (st_ptr) {
+        uint16_t v[8]; memcpy(v, MEM + st_ptr, 16);
+        memset(t, 0, sizeof *t);
+        t->tm_year = v[0] - 1900; t->tm_mon = v[1] - 1; t->tm_mday = v[3];
+        t->tm_hour = v[4]; t->tm_min = v[5]; t->tm_sec = v[6];
+    } else {
+        struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); localtime_r(&ts.tv_sec, t);
+    }
+}
+SHIM(GetDateFormatA) {
+    struct tm t; read_or_now_tm(ARG(c, 2), &t);
+    char s[64]; snprintf(s, sizeof s, "%02d/%02d/%04d", t.tm_mon + 1, t.tm_mday, t.tm_year + 1900);
+    uint32_t buf = ARG(c, 4), n = ARG(c, 5), need = (uint32_t)strlen(s) + 1;
+    if (!n) { RET(c, need, 6); return; }
+    if (n < need) { SETERR(122); RET(c, 0, 6); return; }
+    memcpy(MEM + buf, s, need); RET(c, need, 6);
+}
+SHIM(GetTimeFormatA) {
+    struct tm t; read_or_now_tm(ARG(c, 2), &t);
+    char s[64]; snprintf(s, sizeof s, "%02d:%02d:%02d", t.tm_hour, t.tm_min, t.tm_sec);
+    uint32_t buf = ARG(c, 4), n = ARG(c, 5), need = (uint32_t)strlen(s) + 1;
+    if (!n) { RET(c, need, 6); return; }
+    if (n < need) { SETERR(122); RET(c, 0, 6); return; }
+    memcpy(MEM + buf, s, need); RET(c, need, 6);
+}
+SHIM(GetComputerNameA) {
+    uint32_t buf = ARG(c, 0), psz = ARG(c, 1);
+#ifdef FNV_GAME_SKYRIM
+    const char *nm = "SKYRIM-MAC";
+#else
+    const char *nm = "FALLOUT-MAC";
+#endif
+    uint32_t len = (uint32_t)strlen(nm);
+    if (!psz || G32(psz) <= len) { if (psz) P32(psz, len + 1); SETERR(111); RET(c, 0, 2); return; }
+    memcpy(MEM + buf, nm, len + 1); P32(psz, len); RET(c, 1, 2);
 }
 SHIM(SystemTimeToTzSpecificLocalTime) { memcpy(MEM + ARG(c, 2), MEM + ARG(c, 1), 16); RET(c, 1, 3); }
 SHIM(GetTimeZoneInformation) { memset(MEM + ARG(c, 0), 0, 172); RET(c, 0, 1); }
@@ -221,9 +262,10 @@ SHIM_TABLE(text_shims,
     E(LCMapStringA) E(LCMapStringW) E(LCMapStringEx)
     E(CompareStringA) E(CompareStringW) E(GetStringTypeA) E(GetStringTypeW) E(GetUserDefaultLCID) E(GetUserDefaultLangID)
     E(IsValidLocale) E(EnumSystemLocalesA) E(EnumSystemLocalesW) E(GetLocaleInfoA) E(GetLocaleInfoW) E(GetConsoleCP)
-    E(GetConsoleOutputCP) E(GetConsoleMode) E(WriteConsoleA) E(WriteConsoleW) E(ReadConsoleW) E(PeekNamedPipe)
+    E(GetConsoleOutputCP) E(GetConsoleMode) E(WriteConsoleA) E(WriteConsoleW) E(ReadConsoleW)
     E(SetStdHandle) E(SetEnvironmentVariableA) E(SetEnvironmentVariableW) E(ExpandEnvironmentStringsW)
     E(GetLocalTime) E(GetSystemTime) E(SystemTimeToFileTime) E(FileTimeToSystemTime)
-    E(FileTimeToLocalFileTime) E(SystemTimeToTzSpecificLocalTime) E(GetTimeZoneInformation) E(GetSystemInfo)
+    E(FileTimeToLocalFileTime) E(LocalFileTimeToFileTime) E(GetDateFormatA) E(GetTimeFormatA) E(GetComputerNameA)
+    E(SystemTimeToTzSpecificLocalTime) E(GetTimeZoneInformation) E(GetSystemInfo)
     E(GlobalMemoryStatus) E(GlobalMemoryStatusEx) E(LocalFree) E(FormatMessageA) E(DebugBreak)
     E(RaiseException) E(RtlUnwind) E(TerminateProcess))

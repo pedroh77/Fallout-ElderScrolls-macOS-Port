@@ -1,13 +1,14 @@
 #!/bin/bash
-# Fallout: New Vegas & Fallout 3 native macOS (Apple Silicon) quick builder & packager.
+# Fallout 3, Fallout: New Vegas & Skyrim (32-bit LE) native macOS (Apple Silicon) quick builder & packager.
 #
-# Recompiles your own PC copy of Fallout: New Vegas (Steam, GOG, or Epic)
-# or Fallout 3 (GOG or Steam) into a standalone Apple Silicon macOS bundle
-# ("Fallout New Vegas.app" or "Fallout 3.app").
+# Recompiles your own PC copy of Fallout: New Vegas (Steam, GOG, or Epic),
+# Fallout 3 (GOG or Steam), or The Elder Scrolls V: Skyrim 32-bit LE (Steam)
+# into a standalone Apple Silicon macOS bundle ("Fallout New Vegas.app",
+# "Fallout 3.app", or "Skyrim.app").
 #
-# Usage: quick-install.sh [--game fnv|fallout3] [--download] [--dmg] [--keep-cache] [--keep-ghidra] [--unpack-drm] [--no-steam] [--with-steam] [-h|--help] [game_path]
-#   --game <id>      select game explicitly: fnv or fallout3 (default: auto-detect;
-#                    a numbered menu appears when several installations are found)
+# Usage: quick-install.sh [--game fnv|fallout3|skyrim] [--download] [--dmg] [--keep-cache] [--keep-ghidra] [--unpack-drm] [--no-steam] [--with-steam] [-h|--help] [game_path]
+#   --game <id>      select game explicitly: fnv, fallout3, or skyrim (default:
+#                    auto-detect; a numbered menu appears when several are found)
 #   --download       download your Windows copy from Steam via steamcmd
 #   --dmg            also wrap the app in "<App Name>.dmg"
 #   --keep-cache     keep ~/Library/Caches/fnv-macos after a successful build (for faster rebuilds)
@@ -16,8 +17,8 @@
 #   --no-steam       keep Steam builds in offline mode (skip Steam launcher, overlay & libsteam_api.dylib; already default for Fallout 3)
 #   --with-steam     opt into Steam launcher & Overlay for Fallout 3 Steam builds (off by default)
 #   -h, --help       show help text and exit
-#   game_path        optional GOG installer (.exe), folder containing FalloutNV.exe/Fallout3.exe
-#                    and Data/, or an existing app bundle.
+#   game_path        optional GOG installer (.exe), folder containing FalloutNV.exe,
+#                    Fallout3.exe, or TESV.exe + Data/, or an existing app bundle.
 set -euo pipefail
 
 GOG_EXE_SHA256="89e7020487e80f20ddc92ea641c4433b2c6839a82f45a076e414d167d11dd0fe"
@@ -25,6 +26,9 @@ STEAM_OG_EXE_SHA256="3a87f92f011e5dc9179ddf733cf08be2b39ea6e5b7a8a9e3a9a72dafcc1
 STEAM_UNPACKED_EXE_SHA256="19406942e48724d797300c4ea6be9ac69a32f670b8c35db09279a2258422739f"
 F3_GOG_EXE_SHA256="df9f0e1ec2c5413a9cef2db2dde6d926b99707d528049af4eb15538587d55f99"
 F3_STEAM_EXE_SHA256="c3f97c2255fa041a851c17cf372d69aaadd8694e2dc4230ba556001bbfbd2f3e"
+SKYRIM_STEAM_OG_EXE_SHA256="69362f77bc56bf17570a33106d020b6c67fd8f32a294b82f8b687b9cf71efc72"
+SKYRIM_STEAM_UNPACKED_CLI_SHA256="d97eb0cc0ceef0923d2234d42b382c0d033853356528b271bc043542b1f5e605"
+SKYRIM_STEAM_UNPACKED_GUI_SHA256="124306c7ea4aa8c655e8d9b7b093ea30afa579e40ac0c56dee579a978f87899f"
 STEAMLESS_VERSION="v3.1.0.5"
 STEAMLESS_URL="https://github.com/atom0s/Steamless/releases/download/v3.1.0.5/Steamless.v3.1.0.5.-.by.atom0s.zip"
 STEAMLESS_ZIP_SHA256="e3e2d22e098ff3fb359b2876aa2bed9596f0501e6ff588cbffae90a76d2dc4f5"
@@ -62,14 +66,10 @@ BAR_WIDTH=24
 
 banner() {
 	printf '\n'
-	printf '  %s███████╗ █████╗ ██╗     ██╗      ██████╗ ██╗   ██╗████████╗%s\n' "$G1" "$RESET"
-	printf '  %s██╔════╝██╔══██╗██║     ██║     ██╔═══██╗██║   ██║╚══██╔══╝%s\n' "$G2" "$RESET"
-	printf '  %s█████╗  ███████║██║     ██║     ██║   ██║██║   ██║   ██║   %s\n' "$G3" "$RESET"
-	printf '  %s██╔══╝  ██╔══██║██║     ██║     ██║   ██║██║   ██║   ██║   %s\n' "$G4" "$RESET"
-	printf '  %s██║     ██║  ██║███████╗███████╗╚██████╔╝╚██████╔╝   ██║   %s\n' "$G5" "$RESET"
-	printf '  %s╚═╝     ╚═╝  ╚═╝╚══════╝╚══════╝ ╚═════╝  ╚═════╝    ╚═╝   %s\n' "$G5" "$RESET"
-	printf '\n'
-	printf '  %sFallout 3 & Fallout: New Vegas · Metal · Apple Silicon%s\n' "$DIM" "$RESET"
+	printf '  %s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "$G1" "$RESET"
+	printf '  %sFallout 3 · Fallout: New Vegas · Skyrim (32-bit LE)%s\n' "$G2$BOLD" "$RESET"
+	printf '  %sNative ARM64 Static Recompiler · D3D9 → Metal · Apple Silicon%s\n' "$DIM" "$RESET"
+	printf '  %s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "$G4" "$RESET"
 	printf '\n'
 }
 
@@ -178,27 +178,29 @@ usage() {
 	cat <<'EOF'
 Usage: quick-install.sh [options] [game_path]
 
-Recompiles your PC copy of Fallout 3 (GOTY) or Fallout: New Vegas into a
-standalone Apple Silicon macOS app bundle in ~/Applications.
+Recompiles your PC copy of Fallout 3 (GOTY), Fallout: New Vegas, or
+The Elder Scrolls V: Skyrim (32-bit LE) into a standalone Apple Silicon
+macOS app bundle in ~/Applications.
 
 Options:
-  --game <fnv|fallout3>  Select game explicitly (default: auto-detect)
-  --download             Download Windows game files from Steam via steamcmd
-  --dmg                  Also wrap the built app in "<App Name>.dmg"
-  --keep-cache           Keep ~/Library/Caches/fnv-macos after building
-  --keep-ghidra          Keep Ghidra project & P-code JSONL (implies --keep-cache)
-  --unpack-drm           Unattended: strip SteamStub DRM with Steamless + Mono
-  --no-steam             Keep Steam builds offline (skip launcher & overlay)
-  --with-steam           Enable Steam launcher & Overlay for Fallout 3 Steam
-  -h, --help             Show this help message and exit
+  --game <fnv|fallout3|skyrim>  Select game explicitly (default: auto-detect)
+  --download                    Download Windows game files from Steam via steamcmd
+  --dmg                         Also wrap the built app in "<App Name>.dmg"
+  --keep-cache                  Keep ~/Library/Caches/fnv-macos after building
+  --keep-ghidra                 Keep Ghidra project & P-code JSONL (implies --keep-cache)
+  --unpack-drm                  Unattended: strip SteamStub DRM with Steamless + Mono
+  --no-steam                    Keep Steam builds offline (skip launcher & overlay)
+  --with-steam                  Enable Steam launcher & Overlay for Fallout 3 Steam
+  -h, --help                    Show this help message and exit
 
 Arguments:
-  game_path              Optional GOG setup_*.exe, game folder, or .app bundle
+  game_path                     Optional GOG setup_*.exe, game folder, or .app bundle
 
 Examples:
   ./quick-install.sh
   ./quick-install.sh --download
   ./quick-install.sh --game fallout3
+  ./quick-install.sh --game skyrim
   ./quick-install.sh ~/Downloads/setup_fallout_3_*.exe
 EOF
 }
@@ -206,7 +208,10 @@ EOF
 WANT_DMG=no
 WANT_DOWNLOAD=no
 KEEP_CACHE=no
-[ -n "${FNV_KEEP_CACHE:-}" ] && [ "${FNV_KEEP_CACHE}" != "0" ] && KEEP_CACHE=yes || true
+if { [ -n "${FNV_KEEP_CACHE:-}" ] && [ "${FNV_KEEP_CACHE}" != "0" ]; } || \
+   { [ -n "${SKYRIM_KEEP_CACHE:-}" ] && [ "${SKYRIM_KEEP_CACHE}" != "0" ]; }; then
+	KEEP_CACHE=yes
+fi
 KEEP_GHIDRA=no
 UNPACK_DRM=no
 NO_STEAM=no
@@ -227,7 +232,7 @@ while [ $# -gt 0 ]; do
 		--with-steam) WITH_STEAM=yes ;;
 		--game)
 			shift
-			[ $# -gt 0 ] || die "--game requires an argument (fnv or fallout3)."
+			[ $# -gt 0 ] || die "--game requires an argument (fnv, fallout3, or skyrim)."
 			GAME_ID="$1"
 			;;
 		--game=*) GAME_ID="${1#--game=}" ;;
@@ -239,8 +244,8 @@ while [ $# -gt 0 ]; do
 done
 
 case "$GAME_ID" in
-	""|fnv|fallout3) ;;
-	*) die "Unsupported --game value '$GAME_ID' (expected fnv or fallout3)." ;;
+	""|fnv|fallout3|skyrim) ;;
+	*) die "Unsupported --game value '$GAME_ID' (expected fnv, fallout3, or skyrim)." ;;
 esac
 
 if [ "$WANT_DOWNLOAD" = yes ] && [ -n "$GAME_ARG" ]; then
@@ -255,6 +260,17 @@ ensure_brew_in_path() {
 		eval "$(/opt/homebrew/bin/brew shellenv)"
 		BREW_ADDED_TO_PATH=yes
 	fi
+}
+
+brew_install_quiet() {
+	local label="$1"
+	shift
+	local log_file="$TMP/brew-${#BREW_INSTALLED[@]}.log"
+	if ! run_task "$label" bash -c 'log="$1"; shift; brew install "$@" >"$log" 2>&1' _ "$log_file" "$@"; then
+		cat "$log_file" >&2 || true
+		return 1
+	fi
+	return 0
 }
 
 require_brew() {
@@ -366,9 +382,9 @@ cleanup() {
 trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
-# Step 1: Locate game files (Fallout: New Vegas or Fallout 3)
+# Step 1: Locate game files (Fallout 3, Fallout: New Vegas, or Skyrim)
 # ---------------------------------------------------------------------------
-step "Locating game files (Fallout: New Vegas or Fallout 3)"
+step "Locating game files (Fallout 3, Fallout: New Vegas, or Skyrim)"
 
 MATCHES=()
 MATCH_KEYS=()
@@ -390,14 +406,15 @@ game_display_name() {
 	case "$1" in
 		fallout3) echo "Fallout 3: Game of the Year Edition" ;;
 		fnv) echo "Fallout: New Vegas" ;;
-		*) echo "Fallout (auto-detect)" ;;
+		skyrim) echo "The Elder Scrolls V: Skyrim (32-bit LE)" ;;
+		*) echo "Game (auto-detect)" ;;
 	esac
 }
 
 game_channel() {
 	local dir="${1%/}" app_root
 	case "$dir" in
-		*/steamapps/common/*|*/Steam/steamapps/*|*/steam-download/*|*/depots/22380*|*/depots/22490*|*/depots/22370*|*/depots/22300*)
+		*/steamapps/common/*|*/Steam/steamapps/*|*/steam-download/*|*/depots/22380*|*/depots/22490*|*/depots/22370*|*/depots/22300*|*/depots/72850*)
 			echo "Steam"; return ;;
 	esac
 	case "$dir" in
@@ -432,7 +449,7 @@ scan_gog_installers_in_dir() {
 }
 
 # Collect every installation under one root instead of stopping at the first, so a folder that
-# contains both games (or several copies) can be offered as a choice.
+# contains multiple games (or several copies) can be offered as a choice.
 scan_game_root() {
 	local base="${1%/}" root dir
 	for root in "$base" "$base.app"; do
@@ -449,6 +466,8 @@ scan_game_root() {
 			"$root/Fallout 3/app" \
 			"$root/steamapps/common/Fallout 3 goty" \
 			"$root/steamapps/common/Fallout 3" \
+			"$root/Skyrim" \
+			"$root/steamapps/common/Skyrim" \
 			"$root/Contents/Resources/GameData"; do
 			[ -d "$dir" ] || continue
 			if { [ -z "$GAME_ID" ] || [ "$GAME_ID" = fnv ]; } && [ -f "$dir/FalloutNV.exe" ] && [ -f "$dir/Data/FalloutNV.esm" ]; then
@@ -456,6 +475,9 @@ scan_game_root() {
 			fi
 			if { [ -z "$GAME_ID" ] || [ "$GAME_ID" = fallout3 ]; } && [ -f "$dir/Fallout3.exe" ] && [ -f "$dir/Data/Fallout3.esm" ]; then
 				add_match fallout3 dir "$dir"
+			fi
+			if { [ -z "$GAME_ID" ] || [ "$GAME_ID" = skyrim ]; } && [ -f "$dir/TESV.exe" ] && [ -f "$dir/Data/Skyrim.esm" ]; then
+				add_match skyrim dir "$dir"
 			fi
 		done
 	done
@@ -488,7 +510,7 @@ scan_explicit_path() {
 	if [ -f "$target" ]; then
 		base_lc="$(basename "$target" | tr '[:upper:]' '[:lower:]')"
 		case "$base_lc" in
-			falloutnv.exe|fallout3.exe)
+			falloutnv.exe|fallout3.exe|tesv.exe)
 				scan_game_root "$(dirname "$target")"
 				;;
 			*.exe)
@@ -505,7 +527,7 @@ scan_explicit_path() {
 			*)
 				if [ "$mode" = fatal ]; then
 					die "Unsupported file: $target" \
-						"Pass a GOG setup_*.exe installer or a folder containing FalloutNV.exe/Fallout3.exe and Data/."
+						"Pass a GOG setup_*.exe installer or a folder containing FalloutNV.exe, Fallout3.exe, or TESV.exe and Data/."
 				fi
 				warn "Unsupported file: $target"
 				return 1
@@ -516,16 +538,16 @@ scan_explicit_path() {
 		scan_gog_installers_in_dir "$target"
 	else
 		if [ "$mode" = fatal ]; then
-			die "Could not find a GOG installer or FalloutNV.exe/Fallout3.exe + Data/ in: $target"
+			die "Could not find a GOG installer or FalloutNV.exe/Fallout3.exe/TESV.exe + Data/ in: $target"
 		fi
 		warn "Path not found: $target"
 		return 1
 	fi
 	if [ ${#MATCHES[@]} -eq 0 ]; then
 		if [ "$mode" = fatal ]; then
-			die "Could not find a GOG installer or FalloutNV.exe/Fallout3.exe + Data/ in: $target"
+			die "Could not find a GOG installer or FalloutNV.exe/Fallout3.exe/TESV.exe + Data/ in: $target"
 		fi
-		warn "Could not find a GOG installer or FalloutNV.exe/Fallout3.exe + Data/ in: $target"
+		warn "Could not find a GOG installer or FalloutNV.exe/Fallout3.exe/TESV.exe + Data/ in: $target"
 		return 1
 	fi
 	return 0
@@ -564,18 +586,24 @@ select_steam_download_target() {
 				*)    warn "Please enter 1 or 2." ;;
 			esac
 		done
+	elif [ "$GAME_ID" = skyrim ]; then
+		STEAM_DL_GAME="skyrim"
+		STEAM_DL_APPID="72850"
+		return 0
 	else
 		while true; do
 			printf '\n%sWhich Steam game do you own and want to download?%s\n' "$BOLD" "$RESET"
 			printf '  %s1)%s Fallout: New Vegas (AppID 22380 — Global / Ultimate)\n' "$GOLD" "$RESET"
 			printf '  %s2)%s Fallout 3: Game of the Year Edition (AppID 22370 — includes all DLC)\n' "$GOLD" "$RESET"
-			printf '  %s3)%s Other Steam edition (FNV PCR 22490 / Fallout 3 original 22300)\n' "$GOLD" "$RESET"
-			printf '  Select [1-3]: '
+			printf '  %s3)%s The Elder Scrolls V: Skyrim (32-bit LE, AppID 72850)\n' "$GOLD" "$RESET"
+			printf '  %s4)%s Other Steam edition (FNV PCR 22490 / Fallout 3 original 22300)\n' "$GOLD" "$RESET"
+			printf '  Select [1-4]: '
 			read -r choice || die "Aborted."
 			case "$choice" in
 				1) STEAM_DL_GAME="fnv"; STEAM_DL_APPID="22380"; return 0 ;;
 				2) STEAM_DL_GAME="fallout3"; STEAM_DL_APPID="22370"; return 0 ;;
-				3)
+				3) STEAM_DL_GAME="skyrim"; STEAM_DL_APPID="72850"; return 0 ;;
+				4)
 					while true; do
 						printf '\n%sSelect other Steam edition:%s\n' "$BOLD" "$RESET"
 						printf '  %s1)%s Fallout: New Vegas — PCR regional edition (AppID 22490)\n' "$GOLD" "$RESET"
@@ -591,7 +619,7 @@ select_steam_download_target() {
 						esac
 					done
 					;;
-				*) warn "Please enter 1, 2, or 3." ;;
+				*) warn "Please enter 1, 2, 3, or 4." ;;
 			esac
 		done
 	fi
@@ -604,12 +632,8 @@ download_game_via_steamcmd() {
 	if ! command -v steamcmd >/dev/null 2>&1; then
 		require_brew "to install steamcmd (and build tools)"
 		if ! command -v steamcmd >/dev/null 2>&1; then
-			local steamcmd_log="$TMP/brew-steamcmd.log"
-			if ! run_task "Installing steamcmd via Homebrew" \
-				bash -c 'brew install --cask steamcmd >"$1" 2>&1' _ "$steamcmd_log"; then
-				cat "$steamcmd_log" >&2 || true
-				die "Failed to install steamcmd via Homebrew."
-			fi
+			brew_install_quiet "Installing steamcmd via Homebrew" --cask steamcmd \
+				|| die "Failed to install steamcmd via Homebrew."
 			BREW_INSTALLED+=(steamcmd)
 		fi
 		command -v steamcmd >/dev/null 2>&1 || die "steamcmd not found after installation."
@@ -618,7 +642,10 @@ download_game_via_steamcmd() {
 	fi
 
 	printf '\n  %sDownloading %s via SteamCMD (AppID %s)%s\n' "$BOLD" "$(game_display_name "$STEAM_DL_GAME")" "$STEAM_DL_APPID" "$RESET"
-	printf '    • Files will download into a temporary cache (~9-10 GB) and be moved into the app.\n'
+	if [ "$STEAM_DL_GAME" = skyrim ]; then
+		printf '    • Requires original 32-bit Skyrim (AppID 72850) on your Steam account — not Special/Anniversary Edition.\n'
+	fi
+	printf '    • Files will download into a temporary cache (~9-12 GB) and be moved into the app.\n'
 	printf '    • Enter your Steam account login name (not your public display name).\n'
 	printf '    • SteamCMD will prompt you directly for your password and Steam Guard code\n'
 	printf '      or Mobile Authenticator approval — this script never reads your password.\n\n'
@@ -658,6 +685,8 @@ download_game_via_steamcmd() {
 		if [ "$STEAM_DL_GAME" = fnv ] && [ -f "$download_dir/FalloutNV.exe" ] && [ -f "$download_dir/Data/FalloutNV.esm" ]; then
 			files_ok=yes
 		elif [ "$STEAM_DL_GAME" = fallout3 ] && [ -f "$download_dir/Fallout3.exe" ] && [ -f "$download_dir/Data/Fallout3.esm" ]; then
+			files_ok=yes
+		elif [ "$STEAM_DL_GAME" = skyrim ] && [ -f "$download_dir/TESV.exe" ] && [ -f "$download_dir/Data/Skyrim.esm" ]; then
 			files_ok=yes
 		fi
 
@@ -768,6 +797,25 @@ else
 		)
 		shopt -u nullglob
 	fi
+	if [ -z "$GAME_ID" ] || [ "$GAME_ID" = skyrim ]; then
+		CANDIDATES+=(
+			"/Applications/Skyrim.app"
+			"$HOME/Applications/Skyrim.app"
+			"$HOME/Downloads/Skyrim.app"
+			"$HOME/Downloads/Skyrim"
+			"$HOME/Games/Skyrim"
+			"$HOME/Library/Application Support/Steam/steamapps/common/Skyrim"
+			"$HOME/Steam/steamapps/common/Skyrim"
+		)
+		[ -f "$CACHE_ROOT/steam-download/72850/.steamcmd-complete" ] && \
+			CANDIDATES+=("$CACHE_ROOT/steam-download/72850")
+		shopt -s nullglob
+		CANDIDATES+=(
+			"$HOME"/Downloads/depots/72850/*
+			"$HOME"/depots/72850/*
+		)
+		shopt -u nullglob
+	fi
 	for candidate in "${CANDIDATES[@]+"${CANDIDATES[@]}"}"; do
 		scan_game_root "$candidate"
 	done
@@ -778,18 +826,19 @@ fi
 
 if [ ${#MATCHES[@]} -eq 0 ]; then
 	if [ ! -t 0 ]; then
-		die "Game files or GOG installer not found (Fallout: New Vegas or Fallout 3)." \
+		die "Game files or GOG installer not found (Fallout: New Vegas, Fallout 3, or Skyrim 32-bit LE)." \
 			"Run interactively to download from Steam via steamcmd, or pass the path to your GOG setup_*.exe / game folder:" \
 			"  ./quick-install.sh --download" \
 			"  ./quick-install.sh ~/Downloads/setup_fallout_3_*.exe" \
-			"  ./quick-install.sh ~/Downloads/\"Fallout New Vegas\""
+			"  ./quick-install.sh ~/Downloads/\"Fallout New Vegas\"" \
+			"  ./quick-install.sh \"\$HOME/Library/Application Support/Steam/steamapps/common/Skyrim\""
 	fi
 
 	while [ ${#MATCHES[@]} -eq 0 ]; do
 		printf '\n%sNo local game files or GOG installers were found.%s\n' "$BOLD" "$RESET"
 		printf 'How would you like to provide your copy?\n'
 		printf '  %s1)%s Download from Steam (via steamcmd — installs steamcmd if needed)\n' "$GOLD" "$RESET"
-		printf '  %s2)%s Enter or drag-and-drop a game folder or GOG setup_*.exe installer\n' "$GOLD" "$RESET"
+		printf '  %s2)%s Enter or drag-and-drop a game folder, executable, or GOG setup_*.exe\n' "$GOLD" "$RESET"
 		printf '  %s3)%s Quit\n' "$GOLD" "$RESET"
 		printf '  Select [1-3]: '
 		read -r REPLY || die "Aborted."
@@ -798,7 +847,7 @@ if [ ${#MATCHES[@]} -eq 0 ]; then
 				download_game_via_steamcmd
 				;;
 			2)
-				printf '  %s?%s Drag and drop folder or setup_*.exe here (or type back): ' "$CYAN" "$RESET"
+				printf '  %s?%s Drag and drop folder, .exe, or .app here (or type back): ' "$CYAN" "$RESET"
 				read -r USER_PATH || die "Aborted."
 				case "$USER_PATH" in
 					""|back|BACK|q|Q) continue ;;
@@ -807,8 +856,8 @@ if [ ${#MATCHES[@]} -eq 0 ]; then
 				[ -n "$RESOLVED_INPUT" ] && scan_explicit_path "$RESOLVED_INPUT" interactive || true
 				;;
 			3|[qQ]|[qQ][uU][iI][tT])
-				printf '\n  No problem. To use GOG, put setup_fallout_*.exe and its .bin parts in ~/Downloads/ and re-run ./quick-install.sh.\n'
-				printf '  To download from Steam next time, run ./quick-install.sh --download.\n\n'
+				printf '\n  No problem. To use GOG (Fallout), put setup_fallout_*.exe and its .bin parts in ~/Downloads/ and re-run ./quick-install.sh.\n'
+				printf '  To download any supported game from Steam next time, run ./quick-install.sh --download.\n\n'
 				exit 0
 				;;
 			*)
@@ -850,7 +899,7 @@ else
 		fi
 		RESOLVED="${MATCHES[$((REPLY - 1))]}"
 	else
-		die "Multiple game installations found; pass the folder/installer to use or --game fnv|fallout3." "${OPTIONS[@]}"
+		die "Multiple game installations found; pass the folder/installer to use or --game fnv|fallout3|skyrim." "${OPTIONS[@]}"
 	fi
 fi
 
@@ -866,7 +915,8 @@ if [ "$MATCH_KIND" = gog_installer ]; then
 	ok "Found GOG installer: $GOG_INSTALLER_PATH"
 	if ! command -v innoextract >/dev/null 2>&1; then
 		require_brew "to install innoextract for GOG installers"
-		run_task "Installing innoextract via Homebrew" brew install innoextract
+		brew_install_quiet "Installing innoextract via Homebrew" innoextract \
+			|| die "Failed to install innoextract via Homebrew."
 		BREW_INSTALLED+=(innoextract)
 	fi
 	GOG_OUT="$TMP/gog-extract"
@@ -903,6 +953,13 @@ if [ "$GAME_ID" = fallout3 ]; then
 	GAME_EXE_NAME="Fallout3.exe"
 	GAME_SUPPORT_DIR="Fallout3"
 	GHIDRA_PROJ_NAME="f3"
+elif [ "$GAME_ID" = skyrim ]; then
+	GAME_LABEL="The Elder Scrolls V: Skyrim"
+	APP_NAME="Skyrim"
+	VOLNAME="Skyrim"
+	GAME_EXE_NAME="TESV.exe"
+	GAME_SUPPORT_DIR="Skyrim"
+	GHIDRA_PROJ_NAME="skyrim"
 else
 	GAME_LABEL="Fallout: New Vegas"
 	APP_NAME="Fallout New Vegas"
@@ -928,10 +985,15 @@ print('yes' if b'.bind' in secs else 'no')
 PY
 }
 
+is_supported_skyrim_sha() {
+	[ "$1" = "$SKYRIM_STEAM_UNPACKED_CLI_SHA256" ] || [ "$1" = "$SKYRIM_STEAM_UNPACKED_GUI_SHA256" ]
+}
+
 unpack_steam_drm() {
 	if ! command -v mono >/dev/null 2>&1; then
 		require_brew "to install Mono for Steamless"
-		run_task "Installing Mono runtime via Homebrew" brew install mono
+		brew_install_quiet "Installing Mono runtime via Homebrew" mono \
+			|| die "Failed to install Mono via Homebrew."
 		BREW_INSTALLED+=(mono)
 	fi
 	local mono_bin
@@ -1017,6 +1079,25 @@ if [ "$GAME_ID" = fallout3 ]; then
 	else
 		warn "$GAME_EXE_NAME SHA-256 differs from supported GOG/Steam builds ($ACTUAL_SHA)"
 	fi
+elif [ "$GAME_ID" = skyrim ]; then
+	if is_supported_skyrim_sha "$ACTUAL_SHA" && [ "$HAS_BIND" = no ]; then
+		ok "Verified unpacked Steam TESV.exe (SHA-256 matches precomputed symbols)"
+	elif [ "$ACTUAL_SHA" = "$SKYRIM_STEAM_OG_EXE_SHA256" ] || [ "$HAS_BIND" = yes ]; then
+		if [ "$ACTUAL_SHA" = "$SKYRIM_STEAM_OG_EXE_SHA256" ]; then
+			ok "Detected original Steam TESV.exe 1.9.32.0.8 (SteamStub DRM)"
+		else
+			warn "SteamStub DRM detected in TESV.exe (.bind section present, $ACTUAL_SHA)"
+		fi
+		unpack_steam_drm
+		ACTUAL_SHA="$(shasum -a 256 "$EXE_PATH" | awk '{print $1}')"
+		if is_supported_skyrim_sha "$ACTUAL_SHA"; then
+			ok "Removed SteamStub DRM (SHA-256 matches precomputed Skyrim symbols)"
+		else
+			warn "Removed SteamStub DRM, but unpacked SHA-256 differs ($ACTUAL_SHA)"
+		fi
+	else
+		warn "$GAME_EXE_NAME SHA-256 differs from supported Skyrim 1.9.32.0.8 build ($ACTUAL_SHA)"
+	fi
 elif [ "$ACTUAL_SHA" = "$GOG_EXE_SHA256" ] && [ "$HAS_BIND" = no ]; then
 	ok "Verified DRM-free GOG FalloutNV.exe (SHA-256 matches precomputed symbols)"
 elif [ "$ACTUAL_SHA" = "$STEAM_UNPACKED_EXE_SHA256" ] && [ "$HAS_BIND" = no ]; then
@@ -1070,7 +1151,8 @@ for pkg in ghidra unicorn cmake ffmpeg; do
 done
 
 if [ ${#MISSING_BREW[@]} -gt 0 ]; then
-	run_task "Installing via Homebrew: ${MISSING_BREW[*]}" brew install "${MISSING_BREW[@]}"
+	brew_install_quiet "Installing via Homebrew: ${MISSING_BREW[*]}" "${MISSING_BREW[@]}" \
+		|| die "Failed to install required Homebrew packages: ${MISSING_BREW[*]}"
 	BREW_INSTALLED+=("${MISSING_BREW[@]}")
 fi
 
@@ -1128,6 +1210,10 @@ else
 			SYM_DIR="$SCRIPT_DIR/symbols/fallout3"
 		elif [ "$ACTUAL_SHA" = "$F3_STEAM_EXE_SHA256" ]; then
 			SYM_DIR="$SCRIPT_DIR/symbols/fallout3-steam"
+		fi
+	elif [ "$GAME_ID" = skyrim ]; then
+		if is_supported_skyrim_sha "$ACTUAL_SHA"; then
+			SYM_DIR="$SCRIPT_DIR/symbols/skyrim"
 		fi
 	else
 		if [ "$ACTUAL_SHA" = "$GOG_EXE_SHA256" ]; then
@@ -1238,19 +1324,28 @@ BUILD_OUT="$TMP/build"
 mkdir -p "$BUILD_OUT"
 
 STEAM_BUILD_ARGS=()
-STEAM_GOG_SHA="$GOG_EXE_SHA256"
-STEAM_UNPACKED_SHA="$STEAM_UNPACKED_EXE_SHA256"
 STEAM_DEFAULT_APPID="22380"
 WANT_STEAM=no
+STEAM_ELIGIBLE=no
 if [ "$GAME_ID" = fallout3 ]; then
-	STEAM_GOG_SHA="$F3_GOG_EXE_SHA256"
-	STEAM_UNPACKED_SHA="$F3_STEAM_EXE_SHA256"
 	STEAM_DEFAULT_APPID="22370"
 	[ "$WITH_STEAM" = yes ] && [ "$NO_STEAM" != yes ] && WANT_STEAM=yes
-elif [ "$NO_STEAM" != yes ]; then
-	WANT_STEAM=yes
+	if [ "$WANT_STEAM" = yes ] && [ "$ACTUAL_SHA" != "$F3_GOG_EXE_SHA256" ] && { [ "$ACTUAL_SHA" = "$F3_STEAM_EXE_SHA256" ] || [ -f "$ASSET_SRC/steam_api.dll" ]; }; then
+		STEAM_ELIGIBLE=yes
+	fi
+elif [ "$GAME_ID" = skyrim ]; then
+	STEAM_DEFAULT_APPID="72850"
+	[ "$NO_STEAM" != yes ] && WANT_STEAM=yes
+	if [ "$WANT_STEAM" = yes ] && { is_supported_skyrim_sha "$ACTUAL_SHA" || [ -f "$ASSET_SRC/steam_api.dll" ]; }; then
+		STEAM_ELIGIBLE=yes
+	fi
+else
+	[ "$NO_STEAM" != yes ] && WANT_STEAM=yes
+	if [ "$WANT_STEAM" = yes ] && [ "$ACTUAL_SHA" != "$GOG_EXE_SHA256" ] && { [ "$ACTUAL_SHA" = "$STEAM_UNPACKED_EXE_SHA256" ] || [ -f "$ASSET_SRC/steam_api.dll" ]; }; then
+		STEAM_ELIGIBLE=yes
+	fi
 fi
-if [ "$WANT_STEAM" = yes ] && [ "$ACTUAL_SHA" != "$STEAM_GOG_SHA" ] && { [ "$ACTUAL_SHA" = "$STEAM_UNPACKED_SHA" ] || [ -f "$ASSET_SRC/steam_api.dll" ]; }; then
+if [ "$STEAM_ELIGIBLE" = yes ]; then
 	SW_DIR="$CACHE_ROOT/steamworks/20.1.0"
 	SW_DYLIB="$SW_DIR/libsteam_api.dylib"
 	if [ ! -f "$SW_DYLIB" ]; then
@@ -1290,10 +1385,12 @@ if [ "$WANT_STEAM" = yes ] && [ "$ACTUAL_SHA" != "$STEAM_GOG_SHA" ] && { [ "$ACT
 				|| [ -f "$ASSET_SRC/steamapps/appmanifest_22490.acf" ]; then
 				STEAM_APPID="22490"
 			fi
-		elif [[ "$ASSET_SRC" == *"/22300/"* ]] || [[ "$ASSET_SRC" == *"/22300" ]] \
-			|| { [ ! -f "$ASSET_SRC/../../appmanifest_22370.acf" ] && [ ! -f "$ASSET_SRC/steamapps/appmanifest_22370.acf" ] \
-				&& { [ -f "$ASSET_SRC/../../appmanifest_22300.acf" ] || [ -f "$ASSET_SRC/steamapps/appmanifest_22300.acf" ]; }; }; then
-			STEAM_APPID="22300"
+		elif [ "$GAME_ID" = fallout3 ]; then
+			if [[ "$ASSET_SRC" == *"/22300/"* ]] || [[ "$ASSET_SRC" == *"/22300" ]] \
+				|| { [ ! -f "$ASSET_SRC/../../appmanifest_22370.acf" ] && [ ! -f "$ASSET_SRC/steamapps/appmanifest_22370.acf" ] \
+					&& { [ -f "$ASSET_SRC/../../appmanifest_22300.acf" ] || [ -f "$ASSET_SRC/steamapps/appmanifest_22300.acf" ]; }; }; then
+				STEAM_APPID="22300"
+			fi
 		fi
 		STEAM_BUILD_ARGS=(--steam-api-dylib "$SW_DYLIB" --steam-appid "$STEAM_APPID")
 		ok "Bundling Steam launcher, Overlay hook & libsteam_api.dylib (AppID $STEAM_APPID)"
@@ -1334,6 +1431,7 @@ move_game_files() {
 	for ini in "$ASSET_SRC"/*.ini; do
 		[ -e "$ini" ] && mv "$ini" "$GDATA/"
 	done
+	[ -d "$ASSET_SRC/Skyrim" ] && mv "$ASSET_SRC/Skyrim" "$GDATA/" || true
 	[ -d "$ASSET_SRC/NativeMedia" ] && mv "$ASSET_SRC/NativeMedia" "$GDATA/" || true
 }
 
@@ -1373,7 +1471,10 @@ if [ -n "$VIDEO_DIR" ]; then
 	fi
 fi
 
-mkdir -p "$HOME/Library/Application Support/$GAME_SUPPORT_DIR/UserDocuments" "$HOME/Library/Logs/$GAME_SUPPORT_DIR"
+mkdir -p \
+	"$HOME/Library/Application Support/$GAME_SUPPORT_DIR/UserDocuments" \
+	"$HOME/Library/Application Support/$GAME_SUPPORT_DIR/LocalAppData/$GAME_SUPPORT_DIR" \
+	"$HOME/Library/Logs/$GAME_SUPPORT_DIR"
 
 # ---------------------------------------------------------------------------
 # Step 7: Ad-hoc sign & finalize
@@ -1414,6 +1515,8 @@ cleanup_source_leftovers() {
 			game_folder="$(basename "$src")"
 			if [ "$GAME_ID" = fallout3 ]; then
 				appids="22370 22300"
+			elif [ "$GAME_ID" = skyrim ]; then
+				appids="72850"
 			else
 				appids="22380 22490"
 			fi
@@ -1468,21 +1571,44 @@ cleanup_build_cache() {
 }
 
 print_post_install_notes() {
-	local brew_cmd="brew"
+	local brew_cmd="brew" pkg
+	local -a UNINSTALL_BREW=()
 	if [ "$BREW_SELF_INSTALLED" = yes ] || [ "$BREW_ADDED_TO_PATH" = yes ]; then
 		brew_cmd="/opt/homebrew/bin/brew"
 	fi
 	if [ -n "$GOG_INSTALLER_PATH" ]; then
 		printf '  Original GOG installer files in %s were kept (safe to delete if you do not need a backup).\n' "$(dirname "$GOG_INSTALLER_PATH")"
 	fi
+	if [ "$GAME_ID" = skyrim ]; then
+		printf '  %sNote:%s Skyrim.app dynamically links FFmpeg (libavcodec/libswresample/libavutil) for\n' "$BOLD" "$RESET"
+		printf '  xWMA audio decoding — keep %sffmpeg%s installed via Homebrew to run Skyrim.app.\n' "$BOLD" "$RESET"
+	fi
 	if [ ${#BREW_INSTALLED[@]} -gt 0 ]; then
 		printf '\n  %sHomebrew packages installed during this run:%s %s\n' "$BOLD" "$RESET" "${BREW_INSTALLED[*]}"
-		printf '  None of them are required to play. To uninstall them later:\n'
-		printf '    %s uninstall %s && %s cleanup\n' "$brew_cmd" "${BREW_INSTALLED[*]}" "$brew_cmd"
+		if [ "$GAME_ID" = skyrim ]; then
+			for pkg in "${BREW_INSTALLED[@]}"; do
+				[ "$pkg" = ffmpeg ] && continue
+				UNINSTALL_BREW+=("$pkg")
+			done
+			if [ ${#UNINSTALL_BREW[@]} -gt 0 ]; then
+				printf '  All except ffmpeg are build-only tools and can be uninstalled later:\n'
+				printf '    %s uninstall %s && %s cleanup\n' "$brew_cmd" "${UNINSTALL_BREW[*]}" "$brew_cmd"
+			else
+				printf '  Keep ffmpeg installed for runtime xWMA audio decoding in Skyrim.app.\n'
+			fi
+		else
+			printf '  None of them are required to play. To uninstall them later:\n'
+			printf '    %s uninstall %s && %s cleanup\n' "$brew_cmd" "${BREW_INSTALLED[*]}" "$brew_cmd"
+		fi
 	fi
 	if [ "$BREW_SELF_INSTALLED" = yes ]; then
 		printf '\n  %sHomebrew itself was installed into /opt/homebrew during this run.%s\n' "$BOLD" "$RESET"
-		printf '  It is not required to play. To uninstall Homebrew completely later, run its official script:\n'
+		if [ "$GAME_ID" = skyrim ]; then
+			printf '  Keep Homebrew installed while using Skyrim.app (needed for runtime ffmpeg libraries).\n'
+			printf '  If you remove both later, Homebrew'\''s official uninstall script is:\n'
+		else
+			printf '  It is not required to play. To uninstall Homebrew completely later, run its official script:\n'
+		fi
 		printf '    /bin/bash -c "$(curl -fsSL %s)"\n' "$HOMEBREW_UNINSTALL_URL"
 		printf '  Or to keep using brew in future Terminal sessions, run:\n'
 		printf '    echo '\''eval "$(/opt/homebrew/bin/brew shellenv)"'\'' >> ~/.zprofile\n'
@@ -1495,6 +1621,8 @@ if [ "$WANT_DMG" = no ]; then
 	rm -rf "$DEST_DIR/$APP_NAME.app"
 	mv "$APP" "$DEST_DIR/$APP_NAME.app"
 	GDATA=""
+	LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+	[ -x "$LSREG" ] && "$LSREG" -f "$DEST_DIR/$APP_NAME.app" >/dev/null 2>&1 || true
 	cleanup_source_leftovers
 	cleanup_build_cache
 	ok "Placed $APP_NAME.app in $DEST_DIR"

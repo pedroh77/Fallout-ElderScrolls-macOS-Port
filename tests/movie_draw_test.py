@@ -28,7 +28,7 @@ with tempfile.TemporaryDirectory(prefix='fnv-movie-draw-') as temp:
         language = ['-fobjc-arc'] if source.suffix == '.m' else []
         subprocess.run([*common, *language, *flags, '-c', str(source), '-o', str(obj)], check=True)
         objects.append(str(obj))
-    frameworks = ['Foundation', 'Metal', 'QuartzCore', 'CoreGraphics', 'AVFoundation',
+    frameworks = ['Foundation', 'Metal', 'MetalFX', 'QuartzCore', 'CoreGraphics', 'AVFoundation',
                   'CoreVideo', 'CoreMedia', 'ImageIO', 'UniformTypeIdentifiers']
     subprocess.run(['xcrun', 'clang', *objects,
                     *[arg for name in frameworks for arg in ['-framework', name]], '-o', str(binary)], check=True)

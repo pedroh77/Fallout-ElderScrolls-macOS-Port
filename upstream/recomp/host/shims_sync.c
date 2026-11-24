@@ -514,7 +514,7 @@ SHIM(CloseHandle) {
         if (!dumped++) {
             uint32_t sp = REG(c, R_ESP);
             fprintf(stderr, "[thread]   stack:");
-            for (int i = 0, n = 0; i < 2048 && n < 24; i++) { uint32_t v = G32(sp + 4 * (uint32_t)i); if (v >= 0x401000 && v < 0xfdf000) { fprintf(stderr, " %#x", v); n++; } }
+            for (int i = 0, n = 0; i < 2048 && n < 24; i++) { uint32_t v = G32(sp + 4 * (uint32_t)i); if (v >= 0x401000 && v < 0x1080000) { fprintf(stderr, " %#x", v); n++; } }
             fprintf(stderr, "\n");
         }
     }

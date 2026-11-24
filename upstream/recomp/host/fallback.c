@@ -1,5 +1,7 @@
 // x86 fallback interpreter (from thetheoryofR/Fallout-NV-MacOS, MIT).
 // When dispatch finds no native function for a guest address, runs in Unicorn on the SAME guest memory.
+// All Unicorn calls run under a single non-reentrant mutex: native calls (rt_call / rt_import_call)
+// stop Unicorn via uc_emu_stop, drop the lock, execute natively, and resume Unicorn at the return address.
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,10 +10,20 @@
 
 extern int rt_has_fn(uint32_t a);
 #define MAXDEPTH 32
-static _Thread_local uc_engine *engines[MAXDEPTH];
+static _Thread_local uc_engine *tl_uc;
 static _Thread_local int depth;
-static _Thread_local CPU *cur_cpu[MAXDEPTH];
-static _Thread_local uint32_t cur_root[MAXDEPTH];
+static pthread_mutex_t uc_lock = PTHREAD_MUTEX_INITIALIZER;
+
+typedef struct {
+    uint32_t cur_ip;
+    uint32_t prev_end;
+    int has_pending;
+    int pending_is_import;
+    uint32_t pending_target;
+    uint32_t pending_ret;
+} FallbackRun;
+
+static FallbackRun *active_run;
 
 // Ghidra register-file offsets
 #define O_EFL_CF 512
@@ -55,29 +67,27 @@ static void uc_to_cpu(uc_engine *uc, CPU *c) {
     for (int i = 0; i < 8; i++) { uint64_t x[2]; uc_reg_read(uc, UC_X86_REG_XMM0 + i, x); memcpy(c->r + O_XMM0 + 64 * i, x, 16); }
 }
 
-static _Thread_local uint32_t prev_end[MAXDEPTH];
-
 static void on_block(uc_engine *uc, uint64_t address, uint32_t size, void *user) {
     (void)user;
-    int d = depth - 1;
-    CPU *c = cur_cpu[d];
+    FallbackRun *r = active_run;
+    if (!r || r->has_pending) return;
     uint32_t a = (uint32_t)address;
-    uint32_t came_from = prev_end[d];
-    prev_end[d] = a + size;
+    uint32_t came_from = r->prev_end;
+    r->prev_end = a + size;
     int is_import = a >= IMPORT_THUNK_BASE && a < IMPORT_THUNK_BASE + 0x10000;
-    if (!is_import && (a == cur_root[d] || !rt_has_fn(a))) return;
+    if (!is_import && (a == r->cur_ip || !rt_has_fn(a))) return;
     uint32_t esp; uc_reg_read(uc, UC_X86_REG_ESP, &esp);
     uint32_t ret = G32(esp);
     if (!is_import && ret != came_from) return;
-    uc_to_cpu(uc, c);
-    if (is_import) rt_import_call(c, a);
-    else rt_call(c, a);
-    cpu_to_uc(c, uc);
-    uc_reg_write(uc, UC_X86_REG_EIP, &ret);
+    r->has_pending = 1;
+    r->pending_is_import = is_import;
+    r->pending_target = a;
+    r->pending_ret = ret;
+    uc_emu_stop(uc);
 }
 
 static uc_engine *engine(CPU *c) {
-    if (engines[depth]) return engines[depth];
+    if (tl_uc) return tl_uc;
     uc_engine *uc;
     if (uc_open(UC_ARCH_X86, UC_MODE_32, &uc) != UC_ERR_OK) { fprintf(stderr, "[fallback] uc_open failed\n"); abort(); }
     uc_err e = uc_mem_map_ptr(uc, 0, (size_t)1 << 32, UC_PROT_ALL, MEM);
@@ -94,7 +104,7 @@ static uc_engine *engine(CPU *c) {
     sel = 2 << 3; uc_reg_write(uc, UC_X86_REG_SS, &sel); uc_reg_write(uc, UC_X86_REG_DS, &sel); uc_reg_write(uc, UC_X86_REG_ES, &sel);
     sel = 3 << 3; uc_reg_write(uc, UC_X86_REG_FS, &sel);
     uc_hook h; uc_hook_add(uc, &h, UC_HOOK_BLOCK, (void *)on_block, NULL, 1, 0);
-    engines[depth] = uc;
+    tl_uc = uc;
     return uc;
 }
 
@@ -116,17 +126,34 @@ static void log_root(uint32_t a) {
 void rt_fallback(CPU *c, uint32_t a) {
     if (a < host_text_start || a >= host_text_end || depth >= MAXDEPTH) rt_trap(c, TRAP_NOFN, a);
     log_root(a);
-    uc_engine *uc = engine(c);
-    cur_cpu[depth] = c; cur_root[depth] = a; prev_end[depth] = 0;
-    depth++;
-    uint32_t ret = G32(REG(c, R_ESP));
-    cpu_to_uc(c, uc);
-    uc_err e = uc_emu_start(uc, a, ret, 0, 0);
-    depth--;
-    if (e != UC_ERR_OK) {
-        uint32_t eip; uc_reg_read(uc, UC_X86_REG_EIP, &eip);
-        fprintf(stderr, "[fallback] %s at %#x (root %#x)\n", uc_strerror(e), eip, a);
-        rt_trap(c, TRAP_NOFN, eip);
+    uint32_t root_ret = G32(REG(c, R_ESP));
+    uint32_t cur_ip = a;
+    for (;;) {
+        pthread_mutex_lock(&uc_lock);
+        uc_engine *uc = engine(c);
+        FallbackRun run = {cur_ip, 0, 0, 0, 0, 0};
+        active_run = &run;
+        cpu_to_uc(c, uc);
+        uc_err e = uc_emu_start(uc, cur_ip, root_ret, 0, 0);
+        uc_to_cpu(uc, c);
+        uint32_t eip = 0;
+        uc_reg_read(uc, UC_X86_REG_EIP, &eip);
+        active_run = NULL;
+        pthread_mutex_unlock(&uc_lock);
+
+        if (run.has_pending) {
+            depth++;
+            if (run.pending_is_import) rt_import_call(c, run.pending_target);
+            else rt_call(c, run.pending_target);
+            depth--;
+            if (run.pending_ret == root_ret) return;
+            cur_ip = run.pending_ret;
+            continue;
+        }
+        if (e != UC_ERR_OK) {
+            fprintf(stderr, "[fallback] %s at %#x (root %#x)\n", uc_strerror(e), eip, a);
+            rt_trap(c, TRAP_NOFN, eip);
+        }
+        return;
     }
-    uc_to_cpu(uc, c);
 }

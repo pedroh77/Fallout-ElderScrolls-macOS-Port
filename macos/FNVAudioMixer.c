@@ -76,6 +76,12 @@ void fnv_audio_mix(float *left,float *right,unsigned frames,double rate){
         }
         if(v->frame>=total){if(v->loop)v->frame=fmod(v->frame,total);else{v->playing=0;v->frame=0;}}
     }
+    float mg = master_gain;
     pthread_mutex_unlock(&audio_lock);
+#ifdef FNV_GAME_SKYRIM
+    xa2_audio_mix(left, right, frames, rate, mg);
+#else
+    (void)mg;
+#endif
     for(unsigned i=0;i<frames;i++){left[i]=fmaxf(-1,fminf(1,left[i]));right[i]=fmaxf(-1,fminf(1,right[i]));}
 }

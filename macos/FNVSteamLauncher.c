@@ -64,6 +64,7 @@ static int steam_is_installed(const char *home) {
 static void read_appid(const char *dir, char *out, size_t n) {
     const char *env = getenv("SteamAppId");
     if (!env || !*env) env = getenv("FNV_STEAM_APPID");
+    if (!env || !*env) env = getenv("SKYRIM_STEAM_APPID");
     if (env && *env) {
         snprintf(out, n, "%s", env);
         return;
@@ -179,7 +180,7 @@ static void ensure_steam_running(const char *dir, const char *home) {
 }
 
 static void maybe_inject_overlay(const char *home) {
-    if (!home || is_flag_set("FNV_STEAM_NO_OVERLAY")) return;
+    if (!home || is_flag_set("FNV_STEAM_NO_OVERLAY") || is_flag_set("SKYRIM_STEAM_NO_OVERLAY")) return;
     char overlay[PATH_MAX];
     if (snprintf(overlay, sizeof(overlay),
                  "%s/Library/Application Support/Steam/Steam.AppBundle/Steam/Contents/MacOS/gameoverlayrenderer.dylib",
@@ -217,7 +218,7 @@ int main(int argc, char **argv) {
         return 127;
     }
 
-    if (!is_flag_set("FNV_STEAM_DISABLE")) {
+    if (!is_flag_set("FNV_STEAM_DISABLE") && !is_flag_set("SKYRIM_STEAM_DISABLE") && !is_flag_set("FNV_HEADLESS")) {
         const char *home = getenv("HOME");
         ensure_steam_running(real, home);
         if (is_proc_running("steam_osx")) {

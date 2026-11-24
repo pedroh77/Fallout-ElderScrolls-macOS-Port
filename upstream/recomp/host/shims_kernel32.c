@@ -15,8 +15,16 @@ _Thread_local uint32_t host_last_error;
 static uint32_t cmdline_a, cmdline_w;
 static uint32_t teb_main;
 
+#ifdef FNV_GAME_SKYRIM
+static char g_exe_name[128] = "TESV.exe";
+static char g_game_dir[64] = "Skyrim";
+#elif defined(FNV_GAME_FALLOUT3)
+static char g_exe_name[128] = "Fallout3.exe";
+static char g_game_dir[64] = "Fallout3";
+#else
 static char g_exe_name[128] = "FalloutNV.exe";
 static char g_game_dir[64] = "FalloutNV";
+#endif
 
 const char *host_exe_name(void) { return g_exe_name; }
 const char *host_game_dir(void) { return g_game_dir; }
@@ -28,7 +36,9 @@ void host_init_args(int argc, char **argv) {
         const char *base = slash > bslash ? slash + 1 : (bslash ? bslash + 1 : argv[0]);
         snprintf(g_exe_name, sizeof g_exe_name, "%s", base);
         snprintf(g_game_dir, sizeof g_game_dir, "%s",
-                 strcasecmp(g_exe_name, "Fallout3.exe") == 0 ? "Fallout3" : "FalloutNV");
+                 strcasecmp(g_exe_name, "Fallout3.exe") == 0 ? "Fallout3"
+                 : strcasecmp(g_exe_name, "TESV.exe") == 0 ? "Skyrim"
+                 : "FalloutNV");
     }
     char buf[4096];
     snprintf(buf, sizeof buf, "%s", g_exe_name);
@@ -87,9 +97,16 @@ SHIM(GetCommandLineW_) {
 }
 // ---- modules: system DLLs get fake handles; GetProcAddress hands out dynamic import thunks ----
 #define MOD_BASE 0xFD000000u
+#ifdef FNV_GAME_SKYRIM
+static const char *known_mods[] = {"kernel32", "user32", "gdi32", "advapi32", "shell32", "ole32",
+    "ntdll", "d3d9", "dinput8", "dsound", "xinput1_3", "xaudio2_6", "x3daudio1_7", "winmm", "comctl32",
+    "wsock32", "d3dx9_42", "d3dx9_38", "binkw32", "libvorbisfile", "steam_api", "atimgpud", "shlwapi",
+    "version", "mscoree", "msvcrt"};
+#else
 static const char *known_mods[] = {"kernel32", "user32", "gdi32", "advapi32", "shell32", "ole32",
     "ntdll", "d3d9", "dinput8", "dsound", "xinput1_3", "winmm", "comctl32", "wsock32", "d3dx9_38", "d3dx9_42",
     "binkw32", "libvorbisfile", "steam_api", "xlive", "shlwapi", "version", "mscoree", "msvcrt"};
+#endif
 #define NMODS (sizeof known_mods / sizeof *known_mods)
 
 static uint32_t mod_handle(const char *name) {
@@ -99,7 +116,9 @@ static uint32_t mod_handle(const char *name) {
         low[n++] = (char)(*p >= 'A' && *p <= 'Z' ? *p + 32 : *p);
     low[n] = 0;
     char *dot = strstr(low, ".dll"); if (dot) *dot = 0;
-    if (!strcmp(low, "falloutnv") || !strcmp(low, "fallout3")) return host_image_base;
+    if (!strcmp(low, "falloutnv") || !strcmp(low, "fallout3") ||
+        !strcmp(low, "tesv") || !strcmp(low, "tesv.exe") || !strcmp(low, "skyrim"))
+        return host_image_base;
     for (size_t i = 0; i < NMODS; i++) if (!strcmp(low, known_mods[i])) return MOD_BASE + 0x10000u * (uint32_t)i;
     return 0;
 }
@@ -265,15 +284,23 @@ static void VirtualAlloc_locked(CPU *c) {
     }
     RET(c, lo, 4);
 }
-SHIM(VirtualFree_) { RET(c, 1, 3); }
+SHIM(VirtualFree_) {
+    uint32_t a = ARG(c, 0), n = ARG(c, 1), type = ARG(c, 2);
+    if ((type & 0x4000) && a && n && (uint64_t)a + n <= 0x100000000ull) memset(MEM + a, 0, n);
+    RET(c, 1, 3);
+}
 SHIM(VirtualQuery_) { RET(c, 0, 3); }
 
-// TLS
+// TLS / FLS
 static uint32_t tls_next;
 SHIM(TlsAlloc_) { RET(c, tls_next < TLS_SLOTS ? tls_next++ : 0xFFFFFFFFu, 0); }
 SHIM(TlsFree_) { RET(c, 1, 1); }
 SHIM(TlsGetValue_) { uint32_t i = ARG(c, 0); last_error = 0; RET(c, G32(REG(c, 272) + 0xE10 + 4 * i), 1); }
 SHIM(TlsSetValue_) { uint32_t i = ARG(c, 0); P32(REG(c, 272) + 0xE10 + 4 * i, ARG(c, 1)); RET(c, 1, 2); }
+SHIM(FlsAlloc_) { (void)ARG(c, 0); RET(c, tls_next < TLS_SLOTS ? tls_next++ : 0xFFFFFFFFu, 1); }
+SHIM(FlsFree_) { RET(c, 1, 1); }
+SHIM(FlsGetValue_) { uint32_t i = ARG(c, 0); last_error = 0; RET(c, G32(REG(c, 272) + 0xE10 + 4 * i), 1); }
+SHIM(FlsSetValue_) { uint32_t i = ARG(c, 0); P32(REG(c, 272) + 0xE10 + 4 * i, ARG(c, 1)); RET(c, 1, 2); }
 
 // environment / code pages / startup info
 SHIM(GetEnvironmentStringsW_) { uint32_t p = gmalloc(4); RET(c, p, 0); }
@@ -292,6 +319,8 @@ SHIM(SetHandleCount_) { RET(c, ARG(c, 0), 1); }
 SHIM(SetUnhandledExceptionFilter_) { RET(c, 0, 1); }
 SHIM(UnhandledExceptionFilter_) { RET(c, 0, 1); }
 SHIM(SetConsoleCtrlHandler_) { RET(c, 1, 2); }
+SHIM(SetThreadAffinityMask_) { (void)ARG(c, 0); RET(c, 1, 2); }
+SHIM(IsBadWritePtr_) { uint32_t p = ARG(c, 0), sz = ARG(c, 1); RET(c, sz != 0 && p == 0, 2); }
 SHIM(OutputDebugStringA_) { fprintf(stderr, "[guest] %s", GSTR(ARG(c, 0))); RET(c, 0, 1); }
 SHIM(OutputDebugStringW_) { char s[512]; wide_to_ascii(ARG(c, 0), s, sizeof s); fprintf(stderr, "[guest] %s", s); RET(c, 0, 1); }
 SHIM(EncodePointer_) { RET(c, ARG(c, 0), 1); }
@@ -333,17 +362,23 @@ static const Shim kernel32[] = {
     E(QueryPerformanceFrequency) E(GetSystemTimeAsFileTime) E(IsProcessorFeaturePresent) E(IsDebuggerPresent)
     E(HeapCreate) E(GetProcessHeap) E(HeapDestroy) E(HeapAlloc) E(HeapFree) E(HeapReAlloc) E(HeapSize) E(LocalAlloc)
     E(VirtualAlloc) E(VirtualFree) E(VirtualQuery) E(TlsAlloc) E(TlsFree) E(TlsGetValue) E(TlsSetValue)
+    E(FlsAlloc) E(FlsFree) E(FlsGetValue) E(FlsSetValue)
     E(GetEnvironmentStringsW) E(GetEnvironmentStrings) E(FreeEnvironmentStringsW) E(FreeEnvironmentStringsA)
     E(GetACP) E(GetOEMCP) E(GetCPInfo) E(IsValidCodePage) E(GetStartupInfoA) E(GetStartupInfoW)
     E(GetStdHandle) E(GetFileType) E(SetHandleCount) E(SetUnhandledExceptionFilter)
     E(UnhandledExceptionFilter) E(SetConsoleCtrlHandler) E(OutputDebugStringA) E(OutputDebugStringW)
     E(Sleep) E(ExitProcess) E(EncodePointer) E(DecodePointer)
+    E(SetThreadAffinityMask) E(IsBadWritePtr)
     E(VerifyVersionInfoW) E(VerSetConditionMask) E(CreateProcessA) E(CreateProcessW)
 #undef E
 };
 
 typedef struct { const Shim *list; int count; } ShimTable;
+#ifdef FNV_GAME_SKYRIM
+extern const ShimTable sync_shims, file_shims, text_shims, win_shims, steam_shims, wsock_shims, dinput_shims, dsound_shims, d3d9_shims, d3dx_shims, xinput_shims, media_shims, mmio_shims, xaudio_shims;
+#else
 extern const ShimTable sync_shims, file_shims, text_shims, win_shims, steam_shims, xlive_shims, wsock_shims, dinput_shims, dsound_shims, d3d9_shims, d3dx_shims, xinput_shims, media_shims, mmio_shims;
+#endif
 ShimFn host_find_shim(const char *dll, const char *name) {
     // ordinal imports collide across DLLs: look them up as "<dll basename, lowercase>#<n>"
     char key[160];
@@ -356,7 +391,11 @@ ShimFn host_find_shim(const char *dll, const char *name) {
     }
     for (size_t i = 0; i < sizeof kernel32 / sizeof *kernel32; i++)
         if (!strcmp(kernel32[i].name, name)) return kernel32[i].fn;
+#ifdef FNV_GAME_SKYRIM
+    const ShimTable *tabs[] = {&sync_shims, &file_shims, &text_shims, &win_shims, &steam_shims, &wsock_shims, &dinput_shims, &dsound_shims, &d3d9_shims, &d3dx_shims, &xinput_shims, &media_shims, &mmio_shims, &xaudio_shims};
+#else
     const ShimTable *tabs[] = {&sync_shims, &file_shims, &text_shims, &win_shims, &steam_shims, &xlive_shims, &wsock_shims, &dinput_shims, &dsound_shims, &d3d9_shims, &d3dx_shims, &xinput_shims, &media_shims, &mmio_shims};
+#endif
     for (size_t t = 0; t < sizeof tabs / sizeof *tabs; t++)
         for (int i = 0; i < tabs[t]->count; i++)
             if (!strcmp(tabs[t]->list[i].name, name)) return tabs[t]->list[i].fn;

@@ -26,6 +26,13 @@ def compile_icon(work, resources_dir, source=None):
     work, resources_dir = Path(work), Path(resources_dir)
     source = Path(source) if source else DEFAULT_SOURCE
     resources_dir.mkdir(parents=True, exist_ok=True)
+    icns = resources_dir / 'AppIcon.icns'
+    if source.suffix.lower() == '.icns':
+        data = source.read_bytes()
+        assert data[:4] == b'icns', f'Expected valid .icns file at {source}'
+        shutil.copy2(source, icns)
+        assert icns.is_file() and icns.stat().st_size > 0
+        return {'CFBundleIconFile': 'AppIcon'}
     data = source.read_bytes()
     assert data[:8] == b'\x89PNG\r\n\x1a\n', f'Expected a PNG icon at {source}'
     width, height = struct.unpack_from('>II', data, 16)
@@ -44,7 +51,6 @@ def compile_icon(work, resources_dir, source=None):
              str(source), '--out', str(iconset / name)],
             check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
-    icns = resources_dir / 'AppIcon.icns'
     subprocess.run(['iconutil', '-c', 'icns', str(iconset), '-o', str(icns)], check=True)
     assert icns.is_file() and icns.stat().st_size > 0
     return {'CFBundleIconFile': 'AppIcon'}

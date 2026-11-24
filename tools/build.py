@@ -25,6 +25,34 @@ def run(cmd):
     subprocess.run(cmd, check=True)
 
 
+def patch_generated_tu(content):
+    """Apply narrow correctness guards for vanilla TESV.exe bugs in translated C units."""
+    # 1. Vanilla TESIdleForm::~TESIdleForm (0x55df80) iterates children[0..size-1] via
+    #    NiTArray::GetAt (0x4885e0) and unconditionally dereferences the returned pointer at
+    #    0x55e05f without checking for NULL. Slots removed via g_55d920 leave NULL holes when not
+    #    at the array tail (e.g. Update/DLC plugin loads), causing Quit to Desktop to trap at 0.
+    # 2. Vanilla BSAudioManager shutdown (0xb9bbe0) sends a quit message and waits forever on the
+    #    LibAudioUpdate thread's exit semaphore [eax+0x34] without checking if the thread was ever
+    #    started ([eax+0x24] != 0, skipped at 0xb9f16b when bit 5 / bEnableAudio=0 is set), unlike
+    #    0xb9a7a0 which explicitly checks [eax+0x24]. Skip waiting on an unstarted thread.
+    guards = [
+        (
+            b'L_55e05f: /* MOV dword ptr [EAX + 0x24],0x0 */\n',
+            b'  if(!eax){RT_BRANCH(0x55e05fu);goto L_55e070;}\n',
+        ),
+        (
+            b'L_b9bbec: /* JZ 0x00b9bc44 */\n',
+            b'  if(eax&&!LDM(eax+0x24u,4)){RT_BRANCH(0xb9bbecu);goto L_b9bc44;}\n',
+        ),
+    ]
+    patched = False
+    for label, guard in guards:
+        if label in content:
+            content = content.replace(label, label + guard, 1)
+            patched = True
+    return content, patched
+
+
 def digest(path):
     h = hashlib.sha256()
     with path.open('rb') as f:
@@ -52,10 +80,58 @@ def find_unicorn(explicit):
     return None
 
 
+def find_ffmpeg():
+    """Find FFmpeg headers and dylibs (libavcodec/libswresample/libavutil) for xWMA decoding."""
+    for candidate in ['/opt/local', '/opt/homebrew/opt/ffmpeg', '/opt/homebrew', '/usr/local']:
+        p = Path(candidate)
+        if (p / 'include/libavcodec/avcodec.h').is_file() and (p / 'lib/libavcodec.dylib').is_file():
+            return p
+    return None
+
+
+GAME_PROFILES = {
+    'fnv': {
+        'app_name': 'Fallout New Vegas',
+        'probe_name': 'FNVProbe',
+        'exe_name': 'FalloutNewVegas',
+        'bundle_prefix': 'dev.fnvmac.',
+        'fixed_bundle_id': None,
+        'icon': 'AppIcon.png',
+        'steam_appid': '22380',
+        'define': None,
+        'options_src': 'OptionsFallout.m',
+    },
+    'fallout3': {
+        'app_name': 'Fallout 3',
+        'probe_name': 'FNVProbe',
+        'exe_name': 'Fallout3',
+        'bundle_prefix': None,
+        # Dedicated Fallout 3 identifier so macOS never serves a stale FNV Game Mode icon;
+        # see docs/GAME-MODE-ICONS.md for full details.
+        'fixed_bundle_id': 'dev.f3mac.fallout3',
+        'icon': 'AppIcon-Fallout3.png',
+        'steam_appid': '22370',
+        'define': '-DFNV_GAME_FALLOUT3',
+        'options_src': 'OptionsFallout.m',
+    },
+    'skyrim': {
+        'app_name': 'Skyrim',
+        'probe_name': 'SkyrimProbe',
+        'exe_name': 'Skyrim',
+        'bundle_prefix': 'dev.skyrimmac.',
+        'fixed_bundle_id': None,
+        'icon': 'AppIcon-Skyrim.png',
+        'steam_appid': '72850',
+        'define': '-DFNV_GAME_SKYRIM',
+        'options_src': 'OptionsSkyrim.m',
+    },
+}
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('target', choices=['probe', 'game', 'host-check'])
-    p.add_argument('--game', choices=['fnv', 'fallout3'], default='fnv', help='target game profile')
+    p.add_argument('--game', choices=['fnv', 'fallout3', 'skyrim'], default='fnv', help='target game profile')
     p.add_argument('--generated', type=Path, help='full-game emit.py output')
     p.add_argument('--exe', type=Path, help='exact executable used to generate these units')
     p.add_argument('--out', type=Path, default=Path('build'))
@@ -67,7 +143,7 @@ def main():
     p.add_argument('--unicorn-prefix', type=Path, help='optional Unicorn engine prefix for fallback interpreter')
     p.add_argument('--no-unicorn', action='store_true', help='disable Unicorn fallback interpreter')
     p.add_argument('--steam-api-dylib', type=Path, help='optional Valve ARM64 libsteam_api.dylib to bundle in Frameworks/')
-    p.add_argument('--steam-appid', default='22380', help='Steam AppID written to steam_appid.txt when bundling libsteam_api.dylib')
+    p.add_argument('--steam-appid', default=None, help='Steam AppID written to steam_appid.txt when bundling libsteam_api.dylib')
     p.add_argument('--no-call-trace', action='store_true', help='omit per-function diagnostic ring writes')
     p.add_argument('--deployment-target', default=None, help='macOS deployment target (default: host major.0, min 14.0)')
     p.add_argument('--version', default=os.environ.get('GITHUB_RUN_NUMBER', '1'), help='positive numeric app build version')
@@ -75,6 +151,8 @@ def main():
 
     if not args.version.isdecimal() or not 0 < int(args.version) <= 2147483647:
         p.error('--version must be a positive 32-bit integer')
+    profile = GAME_PROFILES[args.game]
+    steam_appid = str(args.steam_appid or profile['steam_appid']).strip()
     probes = normalize(args.state_probes)
     matched_probes = set()
     probe = args.target == 'probe'
@@ -96,6 +174,9 @@ def main():
     unicorn = None if (probe or args.no_unicorn) else find_unicorn(args.unicorn_prefix)
     if unicorn:
         print(f'Unicorn fallback enabled: {unicorn}', flush=True)
+    ffmpeg = find_ffmpeg() if (args.game == 'skyrim' and not probe) else None
+    if ffmpeg:
+        print(f'FFmpeg xWMA decoding enabled: {ffmpeg}', flush=True)
 
     signature = hashlib.sha256(subprocess.check_output([cc, '--version']) + sdk.encode())
     for header in sorted({hdr for directory in [R, M] for hdr in directory.rglob('*.h')}):
@@ -108,17 +189,20 @@ def main():
         if (args.cache / 'manifest.json').exists():
             old_manifest = json.loads((args.cache / 'manifest.json').read_text())
 
-    default_app = 'Fallout 3' if args.game == 'fallout3' else 'Fallout New Vegas'
-    app_name = args.app_name or ('FNVProbe' if probe else default_app)
-    exe_name = 'FNVProbe' if probe else ('Fallout3' if args.game == 'fallout3' else 'FalloutNewVegas')
+    app_name = args.app_name or (profile['probe_name'] if probe else profile['app_name'])
+    exe_name = profile['probe_name'] if probe else profile['exe_name']
 
     sources = [M / 'FNVApp.m', M / 'FNVPad.c', M / 'FNVDisplay.c', H / 'd3d9_metal.m']
     if probe:
         sources += [M / 'FNVProbe.c', M / 'ProbeRuntime.c']
         sources += [H / (s + '.c') for s in ['d3d9', 'dinput', 'com', 'gheap', 'input', 'sm2msl']]
     else:
-        sources += [M / 'FNVAudioMixer.c', M / 'FNVNativeMedia.m', M / 'FNVNativeVideo.m']
-        sources += [f for f in H.glob('*.c') if f.name not in ('d3d9_null.c', 'fallback.c')]
+        sources += [M / profile['options_src'], M / 'FNVAudioMixer.c', M / 'FNVNativeMedia.m', M / 'FNVNativeVideo.m']
+        if args.game == 'skyrim':
+            sources.append(M / 'FNVXAudioMixer.c')
+        excluded = {'d3d9_null.c', 'fallback.c'}
+        excluded.add('shims_xlive.c' if args.game == 'skyrim' else 'xaudio2.c')
+        sources += [f for f in H.glob('*.c') if f.name not in excluded]
         if unicorn:
             sources.append(H / 'fallback.c')
         sources += [H / 'dshow.m', R / 'rt_dispatch.c']
@@ -144,20 +228,25 @@ def main():
             out = tmp / f'{idx}.o'
             content = source.read_bytes()
             matched = set()
+            patched = False
+            if args.game == 'skyrim' and args.generated and source.parent.resolve() == args.generated.resolve():
+                content, patched = patch_generated_tu(content)
             if probes and args.generated and source.parent.resolve() == args.generated.resolve():
                 content, matched = instrument(content, probes)
                 matched_probes.update(matched)
             compiled_source = source
-            if matched:
-                compiled_source = tmp / ('probe-' + source.name)
+            if patched or matched:
+                compiled_source = tmp / ('patched-' + source.name)
                 compiled_source.write_bytes(content)
             flags = ['-O1', '-I', str(H), '-I', str(R), '-I', str(M)]
-            if args.game == 'fallout3':
-                flags.append('-DFNV_GAME_FALLOUT3')
+            if profile['define']:
+                flags.append(profile['define'])
             if codec:
                 flags += ['-DFNV_HAVE_VORBIS', '-I', str(codec / 'include')]
             if unicorn and source.name == 'fallback.c':
                 flags += ['-I', str(unicorn / 'include')]
+            if ffmpeg and source.name == 'xaudio2.c':
+                flags += ['-DSKYRIM_HAVE_FFMPEG', '-I', str(ffmpeg / 'include')]
             if source.suffix == '.m':
                 flags += ['-fobjc-arc', '-Wno-deprecated-declarations']
             if probe:
@@ -196,6 +285,9 @@ def main():
             libraries.append(str(unicorn / 'lib/libunicorn.a'))
 
         link_flags = ['-Wl,-stack_size,0x4000000']
+        if ffmpeg:
+            libraries += ['-L' + str(ffmpeg / 'lib'), '-lavcodec', '-lswresample', '-lavutil']
+            link_flags.append('-Wl,-rpath,' + str(ffmpeg / 'lib'))
         run(base + objects + libraries + [v for f in frameworks for v in ('-framework', f)] + link_flags + ['-o', str(macos_dir / exe_name)])
 
         bundle_exe = exe_name
@@ -205,19 +297,16 @@ def main():
             frameworks_dir = contents / 'Frameworks'
             frameworks_dir.mkdir(exist_ok=True)
             shutil.copy2(args.steam_api_dylib, frameworks_dir / 'libsteam_api.dylib')
-            (macos_dir / 'steam_appid.txt').write_text(str(args.steam_appid).strip() + '\n')
+            (macos_dir / 'steam_appid.txt').write_text(steam_appid + '\n')
             launcher_name = exe_name + 'Launcher'
             run(base + ['-O2', '-Wall', '-Wextra',
                         '-DFNV_STEAM_GAME_NAME="' + exe_name + '"',
-                        '-DFNV_STEAM_DEFAULT_APPID="' + str(args.steam_appid).strip() + '"',
+                        '-DFNV_STEAM_DEFAULT_APPID="' + steam_appid + '"',
                         str(M / 'FNVSteamLauncher.c'), '-o', str(macos_dir / launcher_name)])
             bundle_exe = launcher_name
 
-        # a dedicated Fallout 3 identifier: macOS keys its per-app icon caches by bundle id,
-        # and the old shared dev.f3mac.game identity kept serving a stale Game Mode icon
-        # full behavior + Oblivion/port checklist: docs/GAME-MODE-ICONS.md
-        bundle_id = ('dev.f3mac.fallout3' if args.game == 'fallout3'
-                     else 'dev.fnvmac.' + args.target)
+        # Unique per-port bundle ID; see docs/GAME-MODE-ICONS.md for Game Mode icon-cache behavior.
+        bundle_id = profile['fixed_bundle_id'] or (profile['bundle_prefix'] + args.target)
         info = dict(
             CFBundleDevelopmentRegion='en',
             CFBundleExecutable=bundle_exe,
@@ -237,7 +326,7 @@ def main():
             info['FNVExecutableSHA256'] = digest(args.exe)
         info['FNVGuestCallTraceEnabled'] = bool(not probe and not args.no_call_trace)
         info['FNVOptimizationLevel'] = 'O1'
-        icon_source = M / 'Assets' / ('AppIcon-Fallout3.png' if args.game == 'fallout3' else 'AppIcon.png')
+        icon_source = M / 'Assets' / profile['icon']
         info.update(compile_icon(tmp, resources_dir, icon_source))
         try:
             info['FNVBuildSourceCommit'] = subprocess.check_output(

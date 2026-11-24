@@ -2,12 +2,12 @@
 
 This note records why the macOS **Game Mode** notice can keep showing a stale
 app icon after the bundle icon changes, and the bundle-identity rules that
-avoid it. It exists so future ports (next: Oblivion) do not repeat the Fallout
-3 / New Vegas icon confusion.
+avoid it. It exists so all ports in this repository (and future ports such as
+Oblivion) do not repeat the Fallout 3 / New Vegas icon confusion.
 
 - **Observed on:** macOS 27.2.1 (build 26B131), Apple Silicon, 2026-11-22.
-- **Confirmed in:** Fallout 3 (`dev.f3mac.fallout3`); the user verified the
-  Game Mode icon after the fix.
+- **Confirmed in:** Fallout 3 (`dev.f3mac.fallout3`) and Skyrim (`dev.skyrimmac.<target>`); the
+  user verified the Game Mode icon after the fix.
 - **Credit:** the per-`CFBundleIdentifier` cache behavior was surfaced by
   **FineWine**; this note records the reproduction and the fix in this port.
 
@@ -89,7 +89,7 @@ Every port/target must have its own identity:
 | --- | --- | --- |
 | Fallout 3 | `dev.f3mac.fallout3` | `macos/Assets/AppIcon-Fallout3.png` |
 | Fallout: New Vegas | `dev.fnvmac.<target>` | `macos/Assets/AppIcon.png` |
-| Skyrim (separate repo) | `dev.skyrimmac.<target>` | Skyrim assets |
+| Skyrim (32-bit LE) | `dev.skyrimmac.<target>` | `macos/Assets/AppIcon-Skyrim.png` |
 | Oblivion (future) | `dev.oblivionmac.<target>` (or `dev.f3mac.oblivion`) | `AppIcon-Oblivion.png` |
 
 Also set:
@@ -117,7 +117,8 @@ reliable way to clear the Game Mode cache.
 3. **Rebuild/reinstall the bundle from scratch** (`rm -rf` the destination
    `.app` first, then install); do not just edit the icon inside the existing
    bundle.
-4. **Re-register LaunchServices** for the new bundle:
+4. **Re-register LaunchServices** for the new bundle (`quick-install.sh` now
+   runs `lsregister -f` automatically after installing `.app` bundles):
 
    ```sh
    LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
@@ -183,6 +184,6 @@ treat Finder's icon or Get Info as proof that Game Mode is fixed.
 - `tools/build.py` — bundle id selection and `CFBundleVersion` handling.
 - `tools/app_icon.py` — `.icns` generation (`sips` + `iconutil`).
 - `README.md` — Game Mode support and bundle identifier notes.
-- `Skyrim-macOS-Port/quick-install.sh` — example of `lsregister -f` after
-  installing the app bundle.
+- `quick-install.sh` — runs `lsregister -f` automatically after installing
+  an app bundle.
 - FineWine — source of the per-bundle-identifier Game Mode icon cache insight.

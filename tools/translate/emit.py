@@ -667,6 +667,47 @@ def write_if_changed(path, text):
         f.write(text)
 
 
+def sanitize_fn(fn):
+    """Drop bogus pointer-slot BRANCHIND targets (e.g. JMP [mem] listing &mem as a flow
+    target) and any non-code disassembly reachable only through them."""
+    insns = fn["insns"]
+    by_a = {i["a"]: i for i in insns}
+    slot_roots = set()
+    for i in insns:
+        for opc, _, ins in i["ops"]:
+            if opc == "BRANCHIND" and ins[0][0] == "ram" and i.get("targets"):
+                ptr = ins[0][1]
+                if ptr in i["targets"]:
+                    i["targets"] = [t for t in i["targets"] if t != ptr]
+                    if ptr in by_a:
+                        slot_roots.add(ptr)
+    if not slot_roots:
+        return fn
+    roots = [fn["entry"]] + FnEmitter.extras.get(fn["entry"], [])
+    seen = set()
+    work = [r for r in roots if r in by_a]
+    while work:
+        a = work.pop()
+        if a in seen:
+            continue
+        seen.add(a)
+        i = by_a[a]
+        for opc, _, ins in i["ops"]:
+            if opc in ("BRANCH", "CBRANCH") and ins[0][0] == "ram" and ins[0][1] in by_a:
+                work.append(ins[0][1])
+            elif opc == "BRANCHIND":
+                for t in i.get("targets") or ():
+                    if t in by_a:
+                        work.append(t)
+        last = i["ops"][-1][0] if i["ops"] else None
+        nxt = a + i["len"]
+        if last not in ("BRANCH", "RETURN", "BRANCHIND") and nxt in by_a:
+            work.append(nxt)
+    if len(seen) < len(insns):
+        fn["insns"] = [i for i in insns if i["a"] in seen]
+    return fn
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("inp")
@@ -693,7 +734,7 @@ def main():
     jump_targets = set()
     summaries = {}
     for line in open(args.inp):
-        fn = json.loads(line)
+        fn = sanitize_fn(json.loads(line))
         summaries[fn["entry"]] = flaglive.summarize(fn)
         mine = {i["a"] for i in fn["insns"]}
         for i in fn["insns"]:
@@ -746,7 +787,7 @@ def main():
         chunk, refs = [], set()
 
     for line in open(args.inp):
-        fn = json.loads(line)
+        fn = sanitize_fn(json.loads(line))
         try:
             em = FnEmitter(fn)
             name, code = em.emit()

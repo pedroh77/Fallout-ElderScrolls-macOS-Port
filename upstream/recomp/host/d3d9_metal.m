@@ -163,7 +163,11 @@ static Fmt fmt_map(uint32_t f) {
         else if (f == FCC('A', 'T', 'I', '1')) { r.pf = MTLPixelFormatBC4_RUnorm; SW(Red, Red, Red, One); }
         else if (f == FCC('A', 'T', 'I', '2')) { r.pf = MTLPixelFormatBC5_RGUnorm; SW(Green, Red, One, One); }   // ATI2 stores Y in the first block
         else if (f == FCC('I', 'N', 'T', 'Z')) r.pf = MTLPixelFormatDepth32Float_Stencil8;
+#ifdef FNV_GAME_SKYRIM
+        else if (f == FCC('N', 'U', 'L', 'L')) r.pf = MTLPixelFormatBGRA8Unorm;
+#else
         else if (f == FCC('N', 'U', 'L', 'L')) r.pf = MTLPixelFormatInvalid;
+#endif
         else r.pf = MTLPixelFormatBGRA8Unorm;
     }
 #undef SW
@@ -414,8 +418,14 @@ static MTLVertexDescriptor *vertex_desc(D3DState *s, const SMInfo *vi, uint32_t 
     }
     for (int st = 0; st < 16; st++) if (*streams_used & (1u << st)) {
         vd.layouts[st].stride = s->stream_stride[st] ? s->stream_stride[st] : 4;
-        vd.layouts[st].stepFunction = MTLVertexStepFunctionPerVertex;
-        [key appendFormat:@"s%d:%u;", st, s->stream_stride[st]];
+        if (s->stream_freq[st] & 0x80000000u) {
+            uint32_t div = s->stream_freq[st] & 0x3FFFFFFFu;
+            vd.layouts[st].stepFunction = MTLVertexStepFunctionPerInstance;
+            vd.layouts[st].stepRate = div ? div : 1;
+        } else {
+            vd.layouts[st].stepFunction = MTLVertexStepFunctionPerVertex;
+        }
+        [key appendFormat:@"s%d:%u:%u;", st, s->stream_stride[st], s->stream_freq[st]];
     }
     return vd;
 }
@@ -541,7 +551,7 @@ static int prim_info(uint32_t prim, uint32_t count, MTLPrimitiveType *pt, uint32
 // Everything a pipeline depends on, compared with memcmp.
 typedef struct {
     uint32_t vs, ps, decl, depth_mask, fvf;
-    uint32_t stride[8];
+    uint32_t stride[8], inst_step[8];
     uint32_t rtfmt[4], rtwm[4], dsfmt, samples;
     uint32_t blend_en, src, dst, op, sep, srca, dsta, opa;
 } PipeKey;
@@ -618,7 +628,13 @@ static int setup_draw(D3DState *s) {
         uint32_t t = s->tex[i];
         if (t && OBJ_KIND(t) == K_TEX && is_depth_fmt(G32(OBJ_F(t, T_FMT)))) k.depth_mask |= 1u << i;
     }
-    for (int i = 0; i < 8; i++) k.stride[i] = s->stream_stride[i];
+    for (int i = 0; i < 8; i++) {
+        k.stride[i] = s->stream_stride[i];
+        if (s->stream_freq[i] & 0x80000000u) {
+            uint32_t div = s->stream_freq[i] & 0x3FFFFFFFu;
+            k.inst_step[i] = div ? div : 1;
+        }
+    }
     for (int i = 0; i < 4; i++) {
         NSUInteger lv, sl; id<MTLTexture> t = surf_target(s->rt[i], &lv, &sl);
         if (!t) continue;
@@ -761,7 +777,11 @@ static int setup_draw(D3DState *s) {
     ec_vbuf(ring[ring_idx], last_vs_off, 20);
     ec_vbytes(s->vsi, sizeof s->vsi, 21);
     ec_vbytes(s->vsb, sizeof s->vsb, 22);
+#ifdef FNV_GAME_SKYRIM
+    float vsys[4] = {s->viewport[2] ? 1.0f / (float)s->viewport[2] : 0, s->viewport[3] ? -1.0f / (float)s->viewport[3] : 0, 0, 0};
+#else
     float vsys[4] = {s->viewport[2] ? -1.0f / (float)s->viewport[2] : 0, s->viewport[3] ? 1.0f / (float)s->viewport[3] : 0, 0, 0};
+#endif
     if(screen)for(unsigned i=0;i<4;i++)vsys[i]=(float)s->viewport[i];
     ec_vbytes(vsys, sizeof vsys, 23);
     ec_fbuf(ring[ring_idx], last_ps_off, 0);
@@ -780,18 +800,41 @@ static int setup_draw(D3DState *s) {
     _Static_assert(sizeof psys <= 256, "psys");
     ec_fbytes(&psys, sizeof psys, 3);
 
+    static id<MTLTexture> dummy_tex, dummy_dtex;
     for (int i = 0; i < 16; i++) {
         if (!(ps->info.samplers & (1u << i))) continue;
         __unsafe_unretained HTex *t = host_tex(s->tex[i]);
-        if (!t) continue;
-        id<MTLTexture> tv = (k.depth_mask >> i) & 1 ? t.tex : t.view;
+        id<MTLTexture> tv = nil;
+        if (t) {
+            tv = (k.depth_mask >> i) & 1 ? t.tex : t.view;
+        } else if ((k.depth_mask >> i) & 1) {
+            if (!dummy_dtex) {
+                MTLTextureDescriptor *dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8 width:1 height:1 mipmapped:NO];
+                dd.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+                dd.storageMode = MTLStorageModePrivate;
+                dummy_dtex = [dev newTextureWithDescriptor:dd];
+            }
+            tv = dummy_dtex;
+        } else {
+            if (!dummy_tex) {
+                MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:1 height:1 mipmapped:NO];
+                td.usage = MTLTextureUsageShaderRead;
+                td.storageMode = MTLStorageModeShared;
+                dummy_tex = [dev newTextureWithDescriptor:td];
+                uint32_t black = 0xFF000000u;
+                [dummy_tex replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:&black bytesPerRow:4];
+            }
+            tv = dummy_tex;
+        }
         if (ec.ftex[i] != tv) { [enc setFragmentTexture:tv atIndex:i]; ec.ftex[i] = tv; }
         id<MTLSamplerState> sm = sampler(s, i, 0);
         if (ec.fsamp[i] != sm) { [enc setFragmentSamplerState:sm atIndex:i]; ec.fsamp[i] = sm; }
+#ifndef FNV_GAME_SKYRIM
         if ((k.depth_mask >> i) & 1) {
             id<MTLSamplerState> sc2 = sampler(s, i, 1);
             if (ec.fsamp[i + 16] != sc2) { [enc setFragmentSamplerState:sc2 atIndex:i + 16]; ec.fsamp[i + 16] = sc2; }
         }
+#endif
     }
     for (int i = 0; i < 4; i++) {
         if (!(vs->info.samplers & (1u << i))) continue;
@@ -823,13 +866,23 @@ static id<MTLBuffer> static_buf(uint32_t b) {
     return m;
 }
 
-static void bind_streams(D3DState *s, uint32_t streams, uint32_t first_vertex, uint32_t nverts) {
+static void bind_streams(D3DState *s, uint32_t streams, uint32_t first_vertex, uint32_t nverts, uint32_t inst_count) {
     for (int st = 0; st < 16; st++) {
         if (!(streams & (1u << st))) continue;
         uint32_t b = s->stream[st];
         if (!b) continue;
         uint32_t stride = s->stream_stride[st], len = G32(OBJ_F(b, B_LEN)), data = G32(OBJ_F(b, B_DATA));
-        uint32_t start = s->stream_off[st] + first_vertex * stride, n = nverts * stride + 64;
+        uint32_t start, n;
+        if (s->stream_freq[st] & 0x80000000u) {
+            uint32_t div = s->stream_freq[st] & 0x3FFFFFFFu;
+            uint32_t rate = div ? div : 1;
+            uint32_t ninst = (inst_count + rate - 1) / rate;
+            start = s->stream_off[st];
+            n = ninst * stride + 64;
+        } else {
+            start = s->stream_off[st] + first_vertex * stride;
+            n = nverts * stride + 64;
+        }
         if (start >= len) continue;
         if (start + n > len) n = len - start;
         __unsafe_unretained id<MTLBuffer> sb = (start & 3) ? nil : static_buf(b);
@@ -848,7 +901,7 @@ static void d3d_backend_draw_impl(D3DState *s, uint32_t prim, uint32_t start, ui
     int kind = prim_info(prim, count, &pt, &n);
     if (!kind) return;
     if (!indexed) {
-        bind_streams(s, (uint32_t)r & 0xFFFF, start, n);
+        bind_streams(s, (uint32_t)r & 0xFFFF, start, n, 1);
         if (kind == 2) {   // fan -> list indices
             uint16_t *ix = malloc(sizeof(uint16_t) * n);
             for (uint32_t i = 0; i < count; i++) { ix[3 * i] = 0; ix[3 * i + 1] = (uint16_t)(i + 1); ix[3 * i + 2] = (uint16_t)(i + 2); }
@@ -858,15 +911,17 @@ static void d3d_backend_draw_impl(D3DState *s, uint32_t prim, uint32_t start, ui
     } else {
         uint32_t ib = s->indices;
         if (!ib) return;
+        uint32_t inst_count = (s->stream_freq[0] & 0x40000000u) ? (s->stream_freq[0] & 0x3FFFFFFFu) : 1u;
+        if (!inst_count) return;
         int i32 = G32(OBJ_F(ib, B_FMT)) == 102;
         uint32_t isz = i32 ? 4 : 2, idata = G32(OBJ_F(ib, B_DATA));
         // vertices the indices can touch: [base+min, base+min+num_vertices)
-        bind_streams(s, (uint32_t)r & 0xFFFF, (uint32_t)(base_vertex + (int32_t)min_index), num_vertices);
+        bind_streams(s, (uint32_t)r & 0xFFFF, (uint32_t)(base_vertex + (int32_t)min_index), num_vertices, inst_count);
         if (kind == 2) return;   // indexed fans: not used by FNV
         __unsafe_unretained id<MTLBuffer> ibuf = ((start * isz) & 3) ? nil : static_buf(ib);
         uint32_t ioff = ibuf ? start * isz : ring_put(MEM + idata + start * isz, n * isz);
         [enc drawIndexedPrimitives:pt indexCount:n indexType:i32 ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16 indexBuffer:ibuf ? ibuf : ring[ring_idx]
-                 indexBufferOffset:ioff instanceCount:1 baseVertex:-(NSInteger)min_index baseInstance:0];
+                 indexBufferOffset:ioff instanceCount:inst_count baseVertex:-(NSInteger)min_index baseInstance:0];
     }
     draws_done++;
 }
@@ -961,7 +1016,14 @@ static void d3d_backend_stretch_impl(D3DState *s, uint32_t src, uint32_t srect, 
     (void)s; (void)srect; (void)drect;
     NSUInteger sl, ss, dl, dsl;
     id<MTLTexture> a = surf_target(src, &sl, &ss), b = surf_target(dst, &dl, &dsl);
-    if (a && b && !(a.pixelFormat >= MTLPixelFormatDepth16Unorm && a.pixelFormat <= MTLPixelFormatX32_Stencil8)) blit(a, b, dl, dsl, filter >= 2);
+    if (!a || !b || a == b) return;
+    if (a.pixelFormat >= MTLPixelFormatDepth16Unorm && a.pixelFormat <= MTLPixelFormatX32_Stencil8) {
+        if (a.pixelFormat == b.pixelFormat && a.width == MAX(1u, b.width >> dl) &&
+            a.height == MAX(1u, b.height >> dl) && a.sampleCount == 1 && b.sampleCount == 1)
+            blit(a, b, dl, dsl, 0);
+        return;
+    }
+    blit(a, b, dl, dsl, filter >= 2);
 }
 static void d3d_backend_colorfill_impl(D3DState *s, uint32_t surf, uint32_t rect, uint32_t color) {
     (void)rect;
@@ -1097,7 +1159,10 @@ static void dump_png(id<MTLTexture> src, uint64_t frame) {
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
     CGContextRef ctx = CGBitmapContextCreate(px, w, h, 8, bpr, cs, kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little);
     CGImageRef img = CGBitmapContextCreateImage(ctx);
-    char path[256]; snprintf(path, sizeof path, "frame_%llu.png", (unsigned long long)frame);
+    char path[512];
+    const char *dir = getenv("FNV_DUMP_DIR");
+    if (dir && dir[0]) snprintf(path, sizeof path, "%s/frame_%llu.png", dir, (unsigned long long)frame);
+    else snprintf(path, sizeof path, "frame_%llu.png", (unsigned long long)frame);
     CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, (CFIndex)strlen(path), false);
     CGImageDestinationRef dst = CGImageDestinationCreateWithURL(url, (__bridge CFStringRef)UTTypePNG.identifier, 1, NULL);
     CGImageDestinationAddImage(dst, img, NULL); CGImageDestinationFinalize(dst);
@@ -1511,6 +1576,9 @@ static const char *aa_name(void) {
 
 static id<MTLFXSpatialScaler> mfx_scaler;
 static id<MTLTexture> mfx_out;
+// Headless bilinear parity: a windowed present scales the final texture into the
+// drawable; with no drawable (benchmarks/dumps) we scale it explicitly so both
+// upscalers pay for an output-resolution pass and dumps are output-sized.
 static id<MTLTexture> linear_out;
 static NSUInteger linear_out_w, linear_out_h;
 static NSUInteger mfx_in_w, mfx_in_h, mfx_out_w, mfx_out_h;

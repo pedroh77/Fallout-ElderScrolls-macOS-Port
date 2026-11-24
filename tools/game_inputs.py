@@ -18,8 +18,11 @@ def sha(path):
     return h.hexdigest()
 
 
+SUPPORTED_EXES = ('FalloutNV.exe', 'Fallout3.exe', 'TESV.exe')
+
+
 def allowed(name):
-    return name in ('FalloutNV.exe','diagnostic-fixtures.json') or bool(re.fullmatch(r'generated/(?:table|stubs|tu_[0-9a-fA-F]+)\.c', name))
+    return name in (*SUPPORTED_EXES, 'diagnostic-fixtures.json') or bool(re.fullmatch(r'generated/(?:table|stubs|tu_[0-9a-fA-F]+)\.c', name))
 
 
 def main():
@@ -41,7 +44,7 @@ def main():
         paths = [args.generated / 'table.c', args.generated / 'stubs.c', *sorted(args.generated.glob('tu_*.c'))]
         if len(paths) < 3 or not all(path.is_file() for path in paths):
             raise ValueError('Complete generated source set required')
-        sources = {'FalloutNV.exe': args.exe, **{f'generated/{path.name}': path for path in paths}}
+        sources = {args.exe.name: args.exe, **{f'generated/{path.name}': path for path in paths}}
         if args.fixtures:
             if args.fixtures.stat().st_size>65536:raise ValueError('Diagnostic fixtures exceed bound')
             sources['diagnostic-fixtures.json']=args.fixtures
@@ -59,7 +62,7 @@ def main():
         print(json.dumps(dict(archive=str(args.out.resolve()), sha256=sha(args.out),
                               bytes=args.out.stat().st_size, input_files=len(sources),
                               uncompressed_bytes=sum(item['bytes'] for item in manifest['files'].values()),
-                              executable_sha256=manifest['files']['FalloutNV.exe']['sha256']), indent=2))
+                              executable_sha256=manifest['files'][args.exe.name]['sha256']), indent=2))
     else:
         if sha(args.archive) != args.archive_sha256:
             raise ValueError('Input ZIP digest mismatch')
@@ -72,9 +75,10 @@ def main():
             manifest = json.loads(archive.read('input-manifest.json'))
             if manifest['recompiler_commit'] != PIN or set(names) != set(manifest['files']) | {'input-manifest.json'}:
                 raise ValueError('Manifest mismatch')
-            if not {'FalloutNV.exe', 'generated/table.c', 'generated/stubs.c'} <= set(names) or not any(name.startswith('generated/tu_') for name in names):
+            exe_members = [n for n in names if n in SUPPORTED_EXES]
+            if len(exe_members) != 1 or not {'generated/table.c', 'generated/stubs.c'} <= set(names) or not any(name.startswith('generated/tu_') for name in names):
                 raise ValueError('Generated input set incomplete')
-            if manifest['files']['FalloutNV.exe']['sha256'] != args.exe_sha256:
+            if manifest['files'][exe_members[0]]['sha256'] != args.exe_sha256:
                 raise ValueError('Executable identity mismatch')
             if sum(archive.getinfo(name).file_size for name in names) > 12 * 1024**3:
                 raise ValueError('Unexpected input size')

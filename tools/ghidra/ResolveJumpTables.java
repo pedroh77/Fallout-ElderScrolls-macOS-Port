@@ -17,12 +17,42 @@ import ghidra.program.model.scalar.Scalar;
 import ghidra.program.model.symbol.*;
 
 public class ResolveJumpTables extends GhidraScript {
+    private static Set<Long> loadPeRelocLocs(Memory mem, Address base) {
+        Set<Long> locs = new HashSet<>();
+        try {
+            int peOff = mem.getInt(base.add(0x3c));
+            Address pe = base.add(peOff);
+            if (mem.getInt(pe) != 0x00004550) return locs;
+            int optOff = peOff + 24;
+            if ((mem.getShort(base.add(optOff)) & 0xffff) != 0x010b) return locs;
+            if ((mem.getInt(base.add(optOff + 92)) & 0xffffffffL) <= 5) return locs;
+            long relocRva = mem.getInt(base.add(optOff + 96 + 8 * 5)) & 0xffffffffL;
+            long relocSize = mem.getInt(base.add(optOff + 96 + 8 * 5 + 4)) & 0xffffffffL;
+            if (relocRva == 0 || relocSize == 0) return locs;
+            Address cur = base.add(relocRva), end = cur.add(relocSize);
+            long imageBase = base.getOffset();
+            while (cur.compareTo(end) < 0 && mem.contains(cur.add(7))) {
+                long pageRva = mem.getInt(cur) & 0xffffffffL;
+                long blkSize = mem.getInt(cur.add(4)) & 0xffffffffL;
+                if (blkSize < 8) break;
+                int count = (int) ((blkSize - 8) / 2);
+                for (int i = 0; i < count; i++) {
+                    int entry = mem.getShort(cur.add(8 + 2L * i)) & 0xffff;
+                    if ((entry >>> 12) == 3) locs.add(imageBase + pageRva + (entry & 0xfff));
+                }
+                cur = cur.add(blkSize);
+            }
+        } catch (Exception ignored) {}
+        return locs;
+    }
+
     @Override
     public void run() throws Exception {
         Listing listing = currentProgram.getListing();
         Memory mem = currentProgram.getMemory();
         ReferenceManager rm = currentProgram.getReferenceManager();
         MemoryBlock text = mem.getBlock(".text");
+        Set<Long> relocLocs = loadPeRelocLocs(mem, currentProgram.getImageBase());
         int jumps = 0, resolved = 0, targets = 0;
         List<Instruction> todo = new ArrayList<>();
         // every computed jump, including ones analysis resolved only partially (e.g. 1 of 23 cases)
@@ -56,15 +86,33 @@ public class ResolveJumpTables extends GhidraScript {
             Set<Address> have = new HashSet<>();
             for (Reference r : in.getReferencesFrom()) if (r.getReferenceType().isFlow()) have.add(r.getToAddress());
             int limit = bound > 0 && bound <= 4096 ? bound : 1024;
-            for (int i = 0; i < limit; i++) {
+            long jmpOff = in.getAddress().getOffset();
+            int startIdx = 0;
+            if (!relocLocs.isEmpty() && !relocLocs.contains(table.getOffset()) && relocLocs.contains(table.add(4).getOffset())) {
+                startIdx = 1; // 1-based jump table (e.g. MSVC CRT aligned-tail switch)
+            }
+            for (int i = startIdx; i < limit; i++) {
                 Address e = table.add(4L * i);
                 if (!mem.contains(e)) break;
+                if (!relocLocs.isEmpty() && !relocLocs.contains(e.getOffset())) break;
                 long v = mem.getInt(e) & 0xffffffffL;
                 Address a = toAddr(v);
                 if (!text.contains(a)) break;
-                if (bound < 0 && Math.abs(v - in.getAddress().getOffset()) > 0x40000) break;   // unbounded: cases live near their switch
-                if (bound < 0 && listing.getDefinedDataContaining(a) != null) break;
+                if (bound < 0 && Math.abs(v - jmpOff) > 0x40000) break;   // unbounded: cases live near their switch
+                if (relocLocs.isEmpty() && bound < 0 && listing.getDefinedDataContaining(a) != null) break;
                 found.add(a);
+            }
+            if (!relocLocs.isEmpty()) {
+                // Negative-indexed jump tables (e.g. MSVC CRT memmove [ecx*4 + table] with ecx in -7..-1)
+                for (int i = -1; i >= -64; i--) {
+                    Address e = table.add(4L * i);
+                    if (!mem.contains(e) || !relocLocs.contains(e.getOffset())) break;
+                    long v = mem.getInt(e) & 0xffffffffL;
+                    Address a = toAddr(v);
+                    if (!text.contains(a)) break;
+                    if (Math.abs(v - jmpOff) > 0x40000) break;
+                    found.add(a);
+                }
             }
             if (found.isEmpty()) continue;
             found.removeAll(have);
