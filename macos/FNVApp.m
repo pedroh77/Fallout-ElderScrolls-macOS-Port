@@ -717,6 +717,18 @@ static NSString *exeHash(NSURL *url) {
 #ifdef FNV_GAME_SKYRIM
     setenv("SKYRIM_ROOT", root.fileSystemRepresentation, 1);
 #endif
+#if !defined(FNV_GAME_FALLOUT3) && !defined(FNV_GAME_SKYRIM)
+    if ((!envRoot || !envRoot[0]) && !getenv("FNV_NVSE_PLUGINS_DIR")) {
+        NSURL *nvsePluginsDir = [appSupport URLByAppendingPathComponent:@"FalloutNV/NVSE/Plugins" isDirectory:YES];
+        NSString *nvseRuntimeDll = [root URLByAppendingPathComponent:@"NVSE/runtime/nvse_1_4.dll"].path;
+        NSString *nvseRootDll = [root URLByAppendingPathComponent:@"nvse_1_4.dll"].path;
+        if ([fm fileExistsAtPath:nvseRuntimeDll] || [fm fileExistsAtPath:nvseRootDll] ||
+            [fm fileExistsAtPath:nvsePluginsDir.path]) {
+            [fm createDirectoryAtURL:nvsePluginsDir withIntermediateDirectories:YES attributes:nil error:NULL];
+            setenv("FNV_NVSE_PLUGINS_DIR", nvsePluginsDir.fileSystemRepresentation, 1);
+        }
+    }
+#endif
     setenv("FNV_FALLBACK_LOG", [self.logDir URLByAppendingPathComponent:@"fallback_entries.txt"].fileSystemRepresentation, 1);
 
     [self.optionsController prepareGameFilesInRoot:root userDir:userDir outW:outW outH:outH];

@@ -6,7 +6,7 @@
 # into a standalone Apple Silicon macOS bundle ("Fallout New Vegas.app",
 # "Fallout 3.app", or "Skyrim.app").
 #
-# Usage: quick-install.sh [--game fnv|fallout3|skyrim] [--download|--download-steam|--download-gog] [--dmg] [--keep-cache] [--keep-ghidra] [--unpack-drm] [--no-steam] [--with-steam] [-h|--help] [game_path]
+# Usage: quick-install.sh [--game fnv|fallout3|skyrim] [--download|--download-steam|--download-gog] [--dmg] [--keep-cache] [--keep-ghidra] [--unpack-drm] [--no-steam] [--with-steam] [--with-nvse] [-h|--help] [game_path]
 #   --game <id>       select game explicitly: fnv, fallout3, or skyrim (default:
 #                     auto-detect; a numbered menu appears when several are found)
 #   --download        download your Windows copy interactively from Steam or GOG
@@ -18,6 +18,7 @@
 #   --unpack-drm      unattended: allow downloading Steamless + Mono to strip SteamStub DRM
 #   --no-steam        keep Steam builds in offline mode (skip Steam launcher, overlay & libsteam_api.dylib; already default for Fallout 3)
 #   --with-steam      opt into Steam launcher & Overlay for Fallout 3 Steam builds (off by default)
+#   --with-nvse       bundle xNVSE 6.4.9 + official Microsoft x86 C/C++ runtime for Fallout: New Vegas (opt-in)
 #   -h, --help        show help text and exit
 #   game_path         optional GOG installer (.exe), folder containing FalloutNV.exe,
 #                     Fallout3.exe, or TESV.exe + Data/, or an existing app bundle.
@@ -37,6 +38,16 @@ STEAMLESS_URL="https://github.com/atom0s/Steamless/releases/download/v3.1.0.5/St
 STEAMLESS_ZIP_SHA256="e3e2d22e098ff3fb359b2876aa2bed9596f0501e6ff588cbffae90a76d2dc4f5"
 STEAMWORKS_URL="https://github.com/rlabrecque/Steamworks.NET/releases/download/20.1.0/Steamworks.NET_20.1.0.unitypackage"
 STEAMWORKS_SHA256="3be79e6bdf53c86210267bf39f46362bb839130896006aec26364c5efc37e314"
+NVSE_VERSION="6.4.9"
+NVSE_URL="https://github.com/xNVSE/NVSE/releases/download/6.4.9/nvse_6_4_9.7z"
+NVSE_7Z_SHA256="81fb0638f87b2c822270e37cf2ca118d39e2425f13028f9173b172c5fdb2eb88"
+NVSE_DLL_SHA256="e82c5d348bac255a8ff4cf477df2e48149304b18f02b42b2a835c3cba71f3dfb"
+MS_VCLIBS_URL="https://download.microsoft.com/download/4/7/c/47c6134b-d61f-4024-83bd-b9c9ea951c25/Microsoft.VCLibs.x86.14.00.Desktop.appx"
+MS_VCLIBS_SHA256="a7fb9d76e07b36d868179eb53ffd13740c25242176fa363f154798cf34edd4a9"
+MS_UCRT_CAB_URL="https://download.visualstudio.microsoft.com/download/pr/616f25d4-4e58-48a3-a8f1-f31e7c172e75/d1927d5466caa917782df8054568731e/fef2cfedd6135e0ed85290b83f3682c3.cab"
+MS_UCRT_CAB_SHA256="4e9a69b016d75b2520b975eee411c7049e0dcc96acd683e9a570834baf4a2192"
+MS_UCRT_CAB_MEMBER="fila4b850e6d3b1997cb1f47f07278644f0"
+MS_UCRTBASE_SHA256="7041885b2a8300bf12a46510228ce8d103d74e83b1baf696b84ff3e5ab785dd1"
 GOGDL_VERSION="v1.4.0"
 GOGDL_URL="https://github.com/Heroic-Games-Launcher/heroic-gogdl/releases/download/v1.4.0/gogdl_macos_arm64"
 GOGDL_SHA256="af167d29ca822f495ff677d03c40bb9d6dc5535dac1f30d71775c91fe844149c"
@@ -221,6 +232,7 @@ Options:
   --unpack-drm                  Unattended: strip SteamStub DRM with Steamless + Mono
   --no-steam                    Keep Steam builds offline (skip launcher & overlay)
   --with-steam                  Enable Steam launcher & Overlay for Fallout 3 Steam
+  --with-nvse                   Bundle xNVSE 6.4.9 + Microsoft x86 CRT for Fallout: New Vegas (opt-in)
   -h, --help                    Show this help message and exit
 
 Arguments:
@@ -247,6 +259,7 @@ KEEP_GHIDRA=no
 UNPACK_DRM=no
 NO_STEAM=no
 WITH_STEAM=no
+WITH_NVSE=no
 GAME_ID=""
 GAME_ARG=""
 BREW_INSTALLED=()
@@ -263,6 +276,7 @@ while [ $# -gt 0 ]; do
 		--unpack-drm) UNPACK_DRM=yes ;;
 		--no-steam) NO_STEAM=yes ;;
 		--with-steam) WITH_STEAM=yes ;;
+		--with-nvse) WITH_NVSE=yes ;;
 		--game)
 			shift
 			[ $# -gt 0 ] || die "--game requires an argument (fnv, fallout3, or skyrim)."
@@ -280,6 +294,10 @@ case "$GAME_ID" in
 	""|fnv|fallout3|skyrim) ;;
 	*) die "Unsupported --game value '$GAME_ID' (expected fnv, fallout3, or skyrim)." ;;
 esac
+
+if [ "$WITH_NVSE" = yes ] && [ -n "$GAME_ID" ] && [ "$GAME_ID" != fnv ]; then
+	die "--with-nvse is only supported for Fallout: New Vegas (--game fnv)."
+fi
 
 if [ -n "$DOWNLOAD_MODE" ] && [ -n "$GAME_ARG" ]; then
 	die "Cannot combine --download / --download-steam / --download-gog with an explicit game path."
@@ -1362,6 +1380,10 @@ fi
 
 ok "Found $GAME_LABEL game files at: $ASSET_SRC"
 
+if [ "$WITH_NVSE" = yes ] && [ "$GAME_ID" != fnv ]; then
+	die "--with-nvse is only supported for Fallout: New Vegas (selected: $GAME_LABEL)."
+fi
+
 EXE_PATH="$ASSET_SRC/$GAME_EXE_NAME"
 
 has_bind_section() {
@@ -1844,6 +1866,102 @@ else
 	move_game_files
 fi
 
+fetch_verified_file() {
+	local label="$1" url="$2" expected_sha="$3" cache_file="$4"
+	local got_sha="" dl_tmp="$TMP/fetch-$(basename "$cache_file").$$"
+	if [ -f "$cache_file" ]; then
+		got_sha="$(shasum -a 256 "$cache_file" | awk '{print $1}')"
+		if [ "$got_sha" = "$expected_sha" ]; then
+			ok "Using cached $label"
+			return 0
+		fi
+		rm -f "$cache_file"
+	fi
+	if ! run_logged_task "Downloading $label" "$TMP/download.log" \
+		curl -fsSL --retry 3 "$url" -o "$dl_tmp"; then
+		rm -f "$dl_tmp"
+		die "Failed to download $label."
+	fi
+	got_sha="$(shasum -a 256 "$dl_tmp" | awk '{print $1}')"
+	if [ "$got_sha" != "$expected_sha" ]; then
+		rm -f "$dl_tmp"
+		die "$label SHA-256 mismatch." \
+			"Expected: $expected_sha" \
+			"Got:      $got_sha"
+	fi
+	mkdir -p "$(dirname "$cache_file")"
+	mv "$dl_tmp" "$cache_file"
+	ok "Verified $label"
+}
+
+install_nvse_runtime() {
+	local gdata="$1"
+	local nvse_archive="$CACHE_ROOT/nvse/$NVSE_VERSION/nvse_6_4_9.7z"
+	local vclibs_appx="$CACHE_ROOT/nvse-crt/Microsoft.VCLibs.x86.14.00.Desktop.appx"
+	local ucrt_cab="$CACHE_ROOT/nvse-crt/ucrt_x86.cab"
+
+	fetch_verified_file "xNVSE $NVSE_VERSION" "$NVSE_URL" "$NVSE_7Z_SHA256" "$nvse_archive"
+	fetch_verified_file "Microsoft VCLibs x86 runtime" "$MS_VCLIBS_URL" "$MS_VCLIBS_SHA256" "$vclibs_appx"
+	fetch_verified_file "Microsoft UCRT x86 runtime" "$MS_UCRT_CAB_URL" "$MS_UCRT_CAB_SHA256" "$ucrt_cab"
+
+	local nvse_ext="$TMP/nvse-extract"
+	local vclibs_ext="$TMP/vclibs-extract"
+	local ucrt_ext="$TMP/ucrt-extract"
+	local rt_dir="$gdata/NVSE/runtime"
+	rm -rf "$nvse_ext" "$vclibs_ext" "$ucrt_ext"
+	mkdir -p "$nvse_ext" "$vclibs_ext" "$ucrt_ext" "$rt_dir" "$gdata/Data/NVSE"
+
+	/usr/bin/tar -xf "$nvse_archive" -C "$nvse_ext" \
+		|| die "Failed to extract xNVSE $NVSE_VERSION archive."
+	local nvse_dll="$nvse_ext/nvse_1_4.dll"
+	[ -f "$nvse_dll" ] || die "nvse_1_4.dll missing from xNVSE archive."
+	local got_nvse_sha
+	got_nvse_sha="$(shasum -a 256 "$nvse_dll" | awk '{print $1}')"
+	if [ "$got_nvse_sha" != "$NVSE_DLL_SHA256" ]; then
+		die "nvse_1_4.dll SHA-256 mismatch." \
+			"Expected: $NVSE_DLL_SHA256" \
+			"Got:      $got_nvse_sha"
+	fi
+	cp "$nvse_dll" "$rt_dir/nvse_1_4.dll"
+	if [ -f "$nvse_ext/Data/NVSE/nvse_config.ini" ] && [ ! -f "$gdata/Data/NVSE/nvse_config.ini" ]; then
+		cp "$nvse_ext/Data/NVSE/nvse_config.ini" "$gdata/Data/NVSE/nvse_config.ini"
+	fi
+
+	/usr/bin/unzip -qo "$vclibs_appx" -d "$vclibs_ext" \
+		|| die "Failed to extract Microsoft VCLibs x86 appx."
+	local crt_dll
+	for crt_dll in \
+		vcruntime140.dll msvcp140.dll msvcp140_1.dll msvcp140_2.dll \
+		msvcp140_atomic_wait.dll msvcp140_codecvt_ids.dll concrt140.dll \
+		vccorlib140.dll vcomp140.dll vcamp140.dll; do
+		if [ -f "$vclibs_ext/$crt_dll" ]; then
+			cp "$vclibs_ext/$crt_dll" "$rt_dir/$crt_dll"
+		fi
+	done
+	[ -f "$rt_dir/vcruntime140.dll" ] && [ -f "$rt_dir/msvcp140.dll" ] \
+		|| die "Required MSVC runtime DLLs (vcruntime140.dll / msvcp140.dll) missing after VCLibs extraction."
+
+	/usr/bin/tar -xf "$ucrt_cab" -C "$ucrt_ext" "$MS_UCRT_CAB_MEMBER" \
+		|| die "Failed to extract ucrtbase.dll from Microsoft UCRT CAB."
+	local ucrt_dll="$ucrt_ext/$MS_UCRT_CAB_MEMBER"
+	[ -f "$ucrt_dll" ] || die "Extracted UCRT member $MS_UCRT_CAB_MEMBER missing."
+	local got_ucrt_sha
+	got_ucrt_sha="$(shasum -a 256 "$ucrt_dll" | awk '{print $1}')"
+	if [ "$got_ucrt_sha" != "$MS_UCRTBASE_SHA256" ]; then
+		die "ucrtbase.dll SHA-256 mismatch." \
+			"Expected: $MS_UCRTBASE_SHA256" \
+			"Got:      $got_ucrt_sha"
+	fi
+	cp "$ucrt_dll" "$rt_dir/ucrtbase.dll"
+
+	mkdir -p "$HOME/Library/Application Support/FalloutNV/NVSE/Plugins"
+	ok "Bundled xNVSE $NVSE_VERSION + official Microsoft x86 C/C++ runtime into GameData/NVSE/runtime/"
+}
+
+if [ "$WITH_NVSE" = yes ] && [ "$GAME_ID" = fnv ]; then
+	install_nvse_runtime "$GDATA"
+fi
+
 # Convert Data/Video/*.bik -> NativeMedia/*.mp4 for native AVFoundation playback
 VIDEO_DIR=""
 for cand in "$GDATA/Data/Video" "$GDATA/data/video" "$GDATA/Data/video"; do
@@ -2002,6 +2120,11 @@ print_post_install_notes() {
 		printf '    /bin/bash -c "$(curl -fsSL %s)"\n' "$HOMEBREW_UNINSTALL_URL"
 		printf '  Or to keep using brew in future Terminal sessions, run:\n'
 		printf '    echo '\''eval "$(/opt/homebrew/bin/brew shellenv)"'\'' >> ~/.zprofile\n'
+	fi
+	if [ "$WITH_NVSE" = yes ] && [ "$GAME_ID" = fnv ]; then
+		printf '\n  %sxNVSE %s bundled (opt-in):%s\n' "$BOLD" "$NVSE_VERSION" "$RESET"
+		printf '  • Drop NVSE plugins (.dll/.ini) into: ~/Library/Application Support/FalloutNV/NVSE/Plugins/\n'
+		printf '  • Toggle in the Options window (hold Option ⌥ on launch) or set FNV_NVSE=0.\n'
 	fi
 	printf '\n'
 }

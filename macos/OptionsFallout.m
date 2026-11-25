@@ -28,7 +28,43 @@ typedef struct {
     BOOL fullscreen;
     BOOL disableMouseAccel;
     BOOL skipLauncher;
+#if !defined(FNV_GAME_FALLOUT3) && !defined(FNV_GAME_SKYRIM)
+    BOOL enableNVSE;
+#endif
 } FalloutOptions;
+
+#if !defined(FNV_GAME_FALLOUT3) && !defined(FNV_GAME_SKYRIM)
+static BOOL isNVSEInstalled(void) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    const char *envRoot = getenv("FNV_ROOT");
+    NSString *rootPath = (envRoot && envRoot[0])
+        ? @(envRoot)
+        : [NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"GameData" isDirectory:YES].path;
+    if (rootPath.length > 0) {
+        if ([fm fileExistsAtPath:[rootPath stringByAppendingPathComponent:@"NVSE/runtime/nvse_1_4.dll"]] ||
+            [fm fileExistsAtPath:[rootPath stringByAppendingPathComponent:@"nvse_1_4.dll"]]) {
+            return YES;
+        }
+    }
+    const char *dllPath = getenv("FNV_DLL_PATH");
+    if (dllPath && dllPath[0]) {
+        for (NSString *dir in [@(dllPath) componentsSeparatedByString:@":"]) {
+            if (dir.length > 0 && [fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"nvse_1_4.dll"]]) {
+                return YES;
+            }
+        }
+    }
+    return NO;
+}
+
+static NSURL *resolveNvsePluginsURL(void) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    const char *envDir = getenv("FNV_NVSE_PLUGINS_DIR");
+    if (envDir && envDir[0]) return [NSURL fileURLWithPath:@(envDir) isDirectory:YES];
+    NSURL *appSupport = [fm URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
+    return [appSupport URLByAppendingPathComponent:@"FalloutNV/NVSE/Plugins" isDirectory:YES];
+}
+#endif
 
 static int clampInt(int v, int lo, int hi) {
     if (v < lo) return lo;
@@ -127,6 +163,10 @@ static FalloutOptions loadFalloutOptions(void) {
     opts.disableMouseAccel = maObj ? [maObj boolValue] : YES;
     id skObj = [ud objectForKey:prefKey(@"SkipLauncher")];
     opts.skipLauncher = skObj ? [skObj boolValue] : NO;
+#if !defined(FNV_GAME_FALLOUT3) && !defined(FNV_GAME_SKYRIM)
+    id nvseObj = [ud objectForKey:prefKey(@"EnableNVSE")];
+    opts.enableNVSE = nvseObj ? [nvseObj boolValue] : YES;
+#endif
 
     const char *envPreset = getenv("FNV_PRESET");
     if (envPreset && envPreset[0]) {
@@ -165,6 +205,10 @@ static FalloutOptions loadFalloutOptions(void) {
     const char *envMA = getenv("FNV_MOUSE_ACCEL");
     if (envMA && envMA[0]) opts.disableMouseAccel = (atoi(envMA) == 0);
     if (getenv("FNV_WINDOWED")) opts.fullscreen = NO;
+#if !defined(FNV_GAME_FALLOUT3) && !defined(FNV_GAME_SKYRIM)
+    const char *envNvse = getenv("FNV_NVSE");
+    if (envNvse && envNvse[0]) opts.enableNVSE = (strcmp(envNvse, "0") != 0);
+#endif
     return opts;
 }
 
@@ -185,6 +229,9 @@ static void saveFalloutOptions(FalloutOptions opts) {
     [ud setBool:opts.fullscreen forKey:prefKey(@"Fullscreen")];
     [ud setBool:opts.disableMouseAccel forKey:prefKey(@"DisableMouseAccel")];
     [ud setBool:opts.skipLauncher forKey:prefKey(@"SkipLauncher")];
+#if !defined(FNV_GAME_FALLOUT3) && !defined(FNV_GAME_SKYRIM)
+    [ud setBool:opts.enableNVSE forKey:prefKey(@"EnableNVSE")];
+#endif
     [ud synchronize];
 }
 
@@ -218,6 +265,9 @@ static void saveFalloutOptions(FalloutOptions opts) {
 @property (nonatomic, strong) NSTextField *fovTipLabel;
 @property (nonatomic, strong) NSButton *mouseAccelCheck;
 @property (nonatomic, strong) NSButton *skipLauncherCheck;
+#if !defined(FNV_GAME_FALLOUT3) && !defined(FNV_GAME_SKYRIM)
+@property (nonatomic, strong) NSButton *enableNvseCheck;
+#endif
 @end
 
 @implementation FNVOptionsController
@@ -355,9 +405,18 @@ static void saveFalloutOptions(FalloutOptions opts) {
     [NSApp terminate:nil];
 }
 
+#if !defined(FNV_GAME_FALLOUT3) && !defined(FNV_GAME_SKYRIM)
+- (void)openNvsePluginsClicked:(id)sender {
+    (void)sender;
+    NSURL *url = resolveNvsePluginsURL();
+    [NSFileManager.defaultManager createDirectoryAtURL:url withIntermediateDirectories:YES attributes:nil error:NULL];
+    [NSWorkspace.sharedWorkspace openURL:url];
+}
+#endif
+
 - (void)playClicked:(id)sender {
     (void)sender;
-    FalloutOptions opts;
+    FalloutOptions opts = loadFalloutOptions();
     opts.preset = (int)self.presetPopup.selectedItem.tag;
     opts.renderScale = (unsigned)self.scalePopup.selectedItem.tag;
     opts.upscaler = (int)self.upscalerPopup.selectedItem.tag;
@@ -373,6 +432,11 @@ static void saveFalloutOptions(FalloutOptions opts) {
     opts.fullscreen = (self.displayPopup.selectedItem.tag != 0);
     opts.disableMouseAccel = (self.mouseAccelCheck.state == NSControlStateValueOn);
     opts.skipLauncher = (self.skipLauncherCheck.state == NSControlStateValueOn);
+#if !defined(FNV_GAME_FALLOUT3) && !defined(FNV_GAME_SKYRIM)
+    if (self.enableNvseCheck) {
+        opts.enableNVSE = (self.enableNvseCheck.state == NSControlStateValueOn);
+    }
+#endif
     saveFalloutOptions(opts);
     const char *envScale = getenv("FNV_RENDER_SCALE");
     if (envScale && envScale[0]) {
@@ -403,6 +467,10 @@ static void saveFalloutOptions(FalloutOptions opts) {
     if (getenv("FNV_WINDOWED")) opts.fullscreen = NO;
     const char *envMA = getenv("FNV_MOUSE_ACCEL");
     if (envMA && envMA[0]) opts.disableMouseAccel = (atoi(envMA) == 0);
+#if !defined(FNV_GAME_FALLOUT3) && !defined(FNV_GAME_SKYRIM)
+    const char *envNvse = getenv("FNV_NVSE");
+    if (envNvse && envNvse[0]) opts.enableNVSE = (strcmp(envNvse, "0") != 0);
+#endif
 
     self.savedOpts = opts;
     self.hasSavedOpts = YES;
@@ -416,7 +484,14 @@ static void saveFalloutOptions(FalloutOptions opts) {
     self.onPlay = onPlay;
     FalloutOptions opts = loadFalloutOptions();
 
-    NSRect rect = NSMakeRect(0, 0, 480, 653);
+#if !defined(FNV_GAME_FALLOUT3) && !defined(FNV_GAME_SKYRIM)
+    BOOL hasNVSE = isNVSEInstalled();
+    CGFloat dy = hasNVSE ? 44.0 : 0.0;
+#else
+    BOOL hasNVSE = NO;
+    CGFloat dy = 0.0;
+#endif
+    NSRect rect = NSMakeRect(0, 0, 480, 653 + dy);
     self.optionsWindow = [[NSWindow alloc] initWithContentRect:rect
                                                      styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
                                                        backing:NSBackingStoreBuffered
@@ -428,7 +503,7 @@ static void saveFalloutOptions(FalloutOptions opts) {
 
     NSTextField *title = [NSTextField labelWithString:@"Graphics & Input Options"];
     title.font = [NSFont boldSystemFontOfSize:15];
-    title.frame = NSMakeRect(24, 617, 432, 22);
+    title.frame = NSMakeRect(24, 617 + dy, 432, 22);
     [cv addSubview:title];
 
     NSString *dispStr = (self.backingW != self.nativeW || self.backingH != self.nativeH)
@@ -439,10 +514,10 @@ static void saveFalloutOptions(FalloutOptions opts) {
     NSTextField *sub = [NSTextField labelWithString:dispStr];
     sub.font = [NSFont systemFontOfSize:12];
     sub.textColor = NSColor.secondaryLabelColor;
-    sub.frame = NSMakeRect(24, 597, 432, 16);
+    sub.frame = NSMakeRect(24, 597 + dy, 432, 16);
     [cv addSubview:sub];
 
-    NSBox *sep1 = [[NSBox alloc] initWithFrame:NSMakeRect(24, 588, 432, 1)];
+    NSBox *sep1 = [[NSBox alloc] initWithFrame:NSMakeRect(24, 588 + dy, 432, 1)];
     sep1.boxType = NSBoxSeparator;
     [cv addSubview:sep1];
 
@@ -459,8 +534,8 @@ static void saveFalloutOptions(FalloutOptions opts) {
         return p;
     };
 
-    mkLabel(@"Quality Preset:", 554);
-    self.presetPopup = mkPopup(552);
+    mkLabel(@"Quality Preset:", 554 + dy);
+    self.presetPopup = mkPopup(552 + dy);
     [self.presetPopup addItemWithTitle:@"Ultra (Recommended)"]; self.presetPopup.lastItem.tag = 4;
     [self.presetPopup addItemWithTitle:@"High"]; self.presetPopup.lastItem.tag = 3;
     [self.presetPopup addItemWithTitle:@"Medium"]; self.presetPopup.lastItem.tag = 2;
@@ -470,8 +545,8 @@ static void saveFalloutOptions(FalloutOptions opts) {
     self.presetPopup.target = self;
     self.presetPopup.action = @selector(presetChanged:);
 
-    mkLabel(@"Render Scale:", 523);
-    self.scalePopup = mkPopup(521);
+    mkLabel(@"Render Scale:", 523 + dy);
+    self.scalePopup = mkPopup(521 + dy);
     [self.scalePopup addItemWithTitle:@"100% (Native)"]; self.scalePopup.lastItem.tag = 100;
     [self.scalePopup addItemWithTitle:@"85% (Ultra Quality)"]; self.scalePopup.lastItem.tag = 85;
     [self.scalePopup addItemWithTitle:@"75% (Quality)"]; self.scalePopup.lastItem.tag = 75;
@@ -484,33 +559,33 @@ static void saveFalloutOptions(FalloutOptions opts) {
     self.resPreviewLabel = [NSTextField labelWithString:@""];
     self.resPreviewLabel.font = [NSFont systemFontOfSize:11];
     self.resPreviewLabel.textColor = NSColor.secondaryLabelColor;
-    self.resPreviewLabel.frame = NSMakeRect(198, 502, 258, 15);
+    self.resPreviewLabel.frame = NSMakeRect(198, 502 + dy, 258, 15);
     [cv addSubview:self.resPreviewLabel];
 
-    mkLabel(@"Upscaler:", 474);
-    self.upscalerPopup = mkPopup(472);
+    mkLabel(@"Upscaler:", 474 + dy);
+    self.upscalerPopup = mkPopup(472 + dy);
     [self.upscalerPopup addItemWithTitle:@"MetalFX Spatial"]; self.upscalerPopup.lastItem.tag = 1;
     [self.upscalerPopup addItemWithTitle:@"Bilinear"]; self.upscalerPopup.lastItem.tag = 0;
     [self.upscalerPopup selectItemWithTag:opts.upscaler];
     self.upscalerPopup.target = self;
     self.upscalerPopup.action = @selector(upscalerChanged:);
 
-    mkLabel(@"Anti-Aliasing:", 443);
-    self.aaPopup = mkPopup(441);
+    mkLabel(@"Anti-Aliasing:", 443 + dy);
+    self.aaPopup = mkPopup(441 + dy);
     [self.aaPopup addItemWithTitle:@"Off"]; self.aaPopup.lastItem.tag = 0;
     [self.aaPopup addItemWithTitle:@"SMAA 1x (Post-Process)"]; self.aaPopup.lastItem.tag = 1;
     [self.aaPopup addItemWithTitle:@"FXAA (Post-Process)"]; self.aaPopup.lastItem.tag = 2;
     [self.aaPopup selectItemWithTag:opts.antiAliasing];
 
-    mkLabel(@"Texture Size:", 412);
-    self.texturePopup = mkPopup(410);
+    mkLabel(@"Texture Size:", 412 + dy);
+    self.texturePopup = mkPopup(410 + dy);
     [self.texturePopup addItemWithTitle:@"Large (High)"]; self.texturePopup.lastItem.tag = 0;
     [self.texturePopup addItemWithTitle:@"Medium"]; self.texturePopup.lastItem.tag = 1;
     [self.texturePopup addItemWithTitle:@"Small (Low)"]; self.texturePopup.lastItem.tag = 2;
     [self.texturePopup selectItemWithTag:opts.textureSize];
 
-    mkLabel(@"Anisotropic Filtering:", 381);
-    self.anisoPopup = mkPopup(379);
+    mkLabel(@"Anisotropic Filtering:", 381 + dy);
+    self.anisoPopup = mkPopup(379 + dy);
     [self.anisoPopup addItemWithTitle:@"15x (Max)"]; self.anisoPopup.lastItem.tag = 15;
     [self.anisoPopup addItemWithTitle:@"8x"]; self.anisoPopup.lastItem.tag = 8;
     [self.anisoPopup addItemWithTitle:@"4x"]; self.anisoPopup.lastItem.tag = 4;
@@ -518,38 +593,38 @@ static void saveFalloutOptions(FalloutOptions opts) {
     [self.anisoPopup addItemWithTitle:@"Off"]; self.anisoPopup.lastItem.tag = 0;
     if (![self.anisoPopup selectItemWithTag:opts.anisotropy]) [self.anisoPopup selectItemWithTag:15];
 
-    mkLabel(@"Shadow Quality:", 350);
-    self.shadowPopup = mkPopup(348);
+    mkLabel(@"Shadow Quality:", 350 + dy);
+    self.shadowPopup = mkPopup(348 + dy);
     [self.shadowPopup addItemWithTitle:@"Ultra (1024)"]; self.shadowPopup.lastItem.tag = 3;
     [self.shadowPopup addItemWithTitle:@"High (512)"]; self.shadowPopup.lastItem.tag = 2;
     [self.shadowPopup addItemWithTitle:@"Medium (256)"]; self.shadowPopup.lastItem.tag = 1;
     [self.shadowPopup addItemWithTitle:@"Off"]; self.shadowPopup.lastItem.tag = 0;
     [self.shadowPopup selectItemWithTag:opts.shadowQuality];
 
-    mkLabel(@"Water Detail:", 319);
-    self.waterPopup = mkPopup(317);
+    mkLabel(@"Water Detail:", 319 + dy);
+    self.waterPopup = mkPopup(317 + dy);
     [self.waterPopup addItemWithTitle:@"Ultra (1024 Reflections)"]; self.waterPopup.lastItem.tag = 3;
     [self.waterPopup addItemWithTitle:@"High (512 Reflections)"]; self.waterPopup.lastItem.tag = 2;
     [self.waterPopup addItemWithTitle:@"Medium (512 Reflections)"]; self.waterPopup.lastItem.tag = 1;
     [self.waterPopup addItemWithTitle:@"Low (Off)"]; self.waterPopup.lastItem.tag = 0;
     [self.waterPopup selectItemWithTag:opts.waterQuality];
 
-    mkLabel(@"Screen Effects:", 288);
-    self.effectsPopup = mkPopup(286);
+    mkLabel(@"Screen Effects:", 288 + dy);
+    self.effectsPopup = mkPopup(286 + dy);
     [self.effectsPopup addItemWithTitle:@"HDR + Depth of Field"]; self.effectsPopup.lastItem.tag = 3;
     [self.effectsPopup addItemWithTitle:@"HDR Only"]; self.effectsPopup.lastItem.tag = 2;
     [self.effectsPopup addItemWithTitle:@"Bloom"]; self.effectsPopup.lastItem.tag = 1;
     [self.effectsPopup addItemWithTitle:@"Off"]; self.effectsPopup.lastItem.tag = 0;
     [self.effectsPopup selectItemWithTag:opts.screenEffects];
 
-    mkLabel(@"Display Mode:", 257);
-    self.displayPopup = mkPopup(255);
+    mkLabel(@"Display Mode:", 257 + dy);
+    self.displayPopup = mkPopup(255 + dy);
     [self.displayPopup addItemWithTitle:@"Fullscreen"]; self.displayPopup.lastItem.tag = 1;
     [self.displayPopup addItemWithTitle:@"Windowed"]; self.displayPopup.lastItem.tag = 0;
     [self.displayPopup selectItemWithTag:opts.fullscreen ? 1 : 0];
 
-    mkLabel(@"FOV Preset:", 226);
-    self.fovPresetPopup = mkPopup(224);
+    mkLabel(@"FOV Preset:", 226 + dy);
+    self.fovPresetPopup = mkPopup(224 + dy);
     [self.fovPresetPopup addItemWithTitle:@"Original (75° / 55°)"]; self.fovPresetPopup.lastItem.tag = 1;
     [self.fovPresetPopup addItemWithTitle:@"Expanded (90° / 60°)"]; self.fovPresetPopup.lastItem.tag = 2;
     [self.fovPresetPopup addItemWithTitle:@"Wide (100° / 65°)"]; self.fovPresetPopup.lastItem.tag = 3;
@@ -559,9 +634,9 @@ static void saveFalloutOptions(FalloutOptions opts) {
     self.fovPresetPopup.target = self;
     self.fovPresetPopup.action = @selector(fovPresetChanged:);
 
-    mkLabel(@"World FOV:", 197);
+    mkLabel(@"World FOV:", 197 + dy);
     self.worldFovSlider = [NSSlider sliderWithValue:opts.worldFov minValue:75 maxValue:105 target:self action:@selector(fovSliderChanged:)];
-    self.worldFovSlider.frame = NSMakeRect(196, 194, 214, 24);
+    self.worldFovSlider.frame = NSMakeRect(196, 194 + dy, 214, 24);
     self.worldFovSlider.numberOfTickMarks = 7;
     self.worldFovSlider.allowsTickMarkValuesOnly = NO;
     self.worldFovSlider.continuous = YES;
@@ -570,12 +645,12 @@ static void saveFalloutOptions(FalloutOptions opts) {
     self.worldFovValueLabel = [NSTextField labelWithString:@""];
     self.worldFovValueLabel.font = [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightRegular];
     self.worldFovValueLabel.alignment = NSTextAlignmentRight;
-    self.worldFovValueLabel.frame = NSMakeRect(414, 197, 42, 20);
+    self.worldFovValueLabel.frame = NSMakeRect(414, 197 + dy, 42, 20);
     [cv addSubview:self.worldFovValueLabel];
 
-    mkLabel(@"1st-Person FOV:", 169);
+    mkLabel(@"1st-Person FOV:", 169 + dy);
     self.firstPersonFovSlider = [NSSlider sliderWithValue:opts.firstPersonFov minValue:55 maxValue:75 target:self action:@selector(fovSliderChanged:)];
-    self.firstPersonFovSlider.frame = NSMakeRect(196, 166, 214, 24);
+    self.firstPersonFovSlider.frame = NSMakeRect(196, 166 + dy, 214, 24);
     self.firstPersonFovSlider.numberOfTickMarks = 5;
     self.firstPersonFovSlider.allowsTickMarkValuesOnly = NO;
     self.firstPersonFovSlider.continuous = YES;
@@ -584,7 +659,7 @@ static void saveFalloutOptions(FalloutOptions opts) {
     self.firstPersonFovValueLabel = [NSTextField labelWithString:@""];
     self.firstPersonFovValueLabel.font = [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightRegular];
     self.firstPersonFovValueLabel.alignment = NSTextAlignmentRight;
-    self.firstPersonFovValueLabel.frame = NSMakeRect(414, 169, 42, 20);
+    self.firstPersonFovValueLabel.frame = NSMakeRect(414, 169 + dy, 42, 20);
     [cv addSubview:self.firstPersonFovValueLabel];
 
     self.fovTipLabel = [NSTextField labelWithString:@""];
@@ -592,26 +667,50 @@ static void saveFalloutOptions(FalloutOptions opts) {
     self.fovTipLabel.textColor = NSColor.secondaryLabelColor;
     self.fovTipLabel.lineBreakMode = NSLineBreakByWordWrapping;
     self.fovTipLabel.maximumNumberOfLines = 2;
-    self.fovTipLabel.frame = NSMakeRect(198, 136, 258, 26);
+    self.fovTipLabel.frame = NSMakeRect(198, 136 + dy, 258, 26);
     [cv addSubview:self.fovTipLabel];
 
     self.mouseAccelCheck = [NSButton checkboxWithTitle:@"Disable in-game mouse acceleration (menus & camera)"
                                                 target:nil action:nil];
-    self.mouseAccelCheck.frame = NSMakeRect(24, 110, 432, 18);
+    self.mouseAccelCheck.frame = NSMakeRect(24, 110 + dy, 432, 18);
     self.mouseAccelCheck.state = opts.disableMouseAccel ? NSControlStateValueOn : NSControlStateValueOff;
     [cv addSubview:self.mouseAccelCheck];
 
     NSTextField *mouseTip = [NSTextField labelWithString:@"Tip: for external mice, also disable Pointer Acceleration in System Settings → Mouse."];
     mouseTip.font = [NSFont systemFontOfSize:11];
     mouseTip.textColor = NSColor.secondaryLabelColor;
-    mouseTip.frame = NSMakeRect(42, 92, 414, 15);
+    mouseTip.frame = NSMakeRect(42, 92 + dy, 414, 15);
     [cv addSubview:mouseTip];
 
     self.skipLauncherCheck = [NSButton checkboxWithTitle:@"Skip this window on next launch (hold Option ⌥ to reopen)"
                                                   target:nil action:nil];
-    self.skipLauncherCheck.frame = NSMakeRect(24, 68, 432, 18);
+    self.skipLauncherCheck.frame = NSMakeRect(24, 68 + dy, 432, 18);
     self.skipLauncherCheck.state = opts.skipLauncher ? NSControlStateValueOn : NSControlStateValueOff;
     [cv addSubview:self.skipLauncherCheck];
+
+#if !defined(FNV_GAME_FALLOUT3) && !defined(FNV_GAME_SKYRIM)
+    if (hasNVSE) {
+        self.enableNvseCheck = [NSButton checkboxWithTitle:@"Enable xNVSE (Script Extender & Plugins)"
+                                                    target:nil action:nil];
+        self.enableNvseCheck.frame = NSMakeRect(24, 86, 290, 18);
+        self.enableNvseCheck.state = opts.enableNVSE ? NSControlStateValueOn : NSControlStateValueOff;
+        [cv addSubview:self.enableNvseCheck];
+
+        NSButton *openNvseBtn = [NSButton buttonWithTitle:@"Open Plugins…"
+                                                   target:self
+                                                   action:@selector(openNvsePluginsClicked:)];
+        openNvseBtn.frame = NSMakeRect(334, 82, 122, 24);
+        [cv addSubview:openNvseBtn];
+
+        NSTextField *nvseTip = [NSTextField labelWithString:@"Plugins: ~/Library/Application Support/FalloutNV/NVSE/Plugins. Uncheck for vanilla FPS."];
+        nvseTip.font = [NSFont systemFontOfSize:11];
+        nvseTip.textColor = NSColor.secondaryLabelColor;
+        nvseTip.frame = NSMakeRect(42, 66, 414, 15);
+        [cv addSubview:nvseTip];
+    }
+#else
+    (void)hasNVSE;
+#endif
 
     NSBox *sep2 = [[NSBox alloc] initWithFrame:NSMakeRect(24, 56, 432, 1)];
     sep2.boxType = NSBoxSeparator;
@@ -640,6 +739,11 @@ static void saveFalloutOptions(FalloutOptions opts) {
                           outW:(unsigned)outW
                           outH:(unsigned)outH {
     FalloutOptions opts = self.hasSavedOpts ? self.savedOpts : loadFalloutOptions();
+#if !defined(FNV_GAME_FALLOUT3) && !defined(FNV_GAME_SKYRIM)
+    if (!getenv("FNV_NVSE")) {
+        setenv("FNV_NVSE", opts.enableNVSE ? "1" : "0", 1);
+    }
+#endif
     NSFileManager *fm = NSFileManager.defaultManager;
 
 #ifdef FNV_GAME_FALLOUT3

@@ -227,6 +227,21 @@ static void D3DXCreateVolumeTextureFromFileInMemory_(CPU *c) {
     if (!t) { RET(c, D3DXERR_INVALIDDATA, 4); return; }
     P32(ARG(c, 3), t); RET(c, 0, 4);
 }
+static void D3DXCreateTextureFromFileInMemoryEx_(CPU *c) {
+    uint32_t t = dds_load(ARG(c, 0), ARG(c, 1), ARG(c, 2), 0, G32(REG(c, R_ESP)));
+    if (!t) { RET(c, D3DXERR_INVALIDDATA, 15); return; }
+    P32(ARG(c, 14), t); RET(c, 0, 15);
+}
+static void D3DXCreateCubeTextureFromFileInMemoryEx_(CPU *c) {
+    uint32_t t = dds_load(ARG(c, 0), ARG(c, 1), ARG(c, 2), 1, G32(REG(c, R_ESP)));
+    if (!t) { RET(c, D3DXERR_INVALIDDATA, 14); return; }
+    P32(ARG(c, 13), t); RET(c, 0, 14);
+}
+static void D3DXCreateVolumeTextureFromFileInMemoryEx_(CPU *c) {
+    uint32_t t = dds_load(ARG(c, 0), ARG(c, 1), ARG(c, 2), 0, G32(REG(c, R_ESP)));
+    if (!t) { RET(c, D3DXERR_INVALIDDATA, 16); return; }
+    P32(ARG(c, 15), t); RET(c, 0, 16);
+}
 static void D3DXLoadSurfaceFromMemory_(CPU *c) {
     uint32_t surf = ARG(c, 0), src = ARG(c, 3), pitch = ARG(c, 5), srcrect = ARG(c, 7);
     uint32_t w = 0, h = 0;
@@ -246,5 +261,7 @@ const ShimTable d3dx_shims = { (const Shim[]){
     S(D3DXAssembleShaderFromFileA) S(D3DXGetShaderConstantTable) S(D3DXGetImageInfoFromFileInMemory)
     S(D3DXGetImageInfoFromFileA) S(D3DXCreateTextureFromFileExA) S(D3DXLoadSurfaceFromMemory)
     S(D3DXCreateTextureFromFileInMemory) S(D3DXCreateCubeTextureFromFileInMemory)
-    S(D3DXCreateVolumeTextureFromFileInMemory) S(D3DXLoadSurfaceFromSurface) S(D3DXSaveTextureToFileA)
-}, 28 };
+    S(D3DXCreateVolumeTextureFromFileInMemory) S(D3DXCreateTextureFromFileInMemoryEx)
+    S(D3DXCreateCubeTextureFromFileInMemoryEx) S(D3DXCreateVolumeTextureFromFileInMemoryEx)
+    S(D3DXLoadSurfaceFromSurface) S(D3DXSaveTextureToFileA)
+}, 31 };

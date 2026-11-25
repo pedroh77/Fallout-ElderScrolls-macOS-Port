@@ -77,15 +77,27 @@ SHIM(GetDoubleClickTime) { RET(c, 500, 0); }
 SHIM(SwapMouseButton) { RET(c, 0, 1); }
 SHIM(GetAsyncKeyState) { RET(c, input_vk_down((int)ARG(c, 0)) ? 0x8000u : 0u, 1); }
 SHIM(GetKeyState) { RET(c, input_vk_down((int)ARG(c, 0)) ? 0xFF80u : 0u, 1); }
+SHIM(GetKeyboardState) {
+    uint32_t out = ARG(c, 0);
+    if (!out) { RET(c, 0, 1); return; }
+    for (int vk = 0; vk < 256; vk++) MEM[out + vk] = input_vk_down(vk) ? 0x80 : 0;
+    RET(c, 1, 1);
+}
 SHIM(GetKeyboardLayout) { RET(c, 0x04090409u, 1); }
 SHIM(MapVirtualKeyA) { RET(c, input_map_vk(ARG(c, 0), ARG(c, 1)), 2); }
-SHIM(ToUnicode) {
-    uint32_t vk = ARG(c, 0), ks = ARG(c, 2), out = ARG(c, 3); int cap = (int)ARG(c, 4);
+SHIM(MapVirtualKeyExA) { RET(c, input_map_vk(ARG(c, 0), ARG(c, 1)), 3); }
+static int do_to_unicode(uint32_t vk, uint32_t ks, uint32_t out, int cap) {
     int shift = ks ? (MEM[ks + 0x10] & 0x80) != 0 : input_vk_down(0x10);
     int ch = input_vk_to_char((int)vk, shift);
-    if (!ch || cap <= 0) { RET(c, 0, 6); return; }
+    if (!ch || !out || cap <= 0) return 0;
     uint16_t w = (uint16_t)ch; memcpy(MEM + out, &w, 2);
-    RET(c, 1, 6);
+    return 1;
+}
+SHIM(ToUnicode) {
+    RET(c, (uint32_t)do_to_unicode(ARG(c, 0), ARG(c, 2), ARG(c, 3), (int)ARG(c, 4)), 6);
+}
+SHIM(ToUnicodeEx) {
+    RET(c, (uint32_t)do_to_unicode(ARG(c, 0), ARG(c, 2), ARG(c, 3), (int)ARG(c, 4)), 7);
 }
 SHIM(GetCursorPos) { uint32_t p = ARG(c, 0); if (p) { P32(p, fnv_client_width() / 2); P32(p + 4, fnv_client_height() / 2); } RET(c, p != 0, 1); }
 SHIM(GetDlgItem) { RET(c, 0, 2); }
@@ -138,8 +150,10 @@ SHIM(ImageList_Destroy) { RET(c, 1, 1); }
 
 // ---- advapi32: an empty registry (the game falls back to defaults / its INIs) -------------------
 SHIM(RegOpenKeyExA) { RET(c, 2, 5); }                // ERROR_FILE_NOT_FOUND
+SHIM(RegOpenKeyExW) { RET(c, 2, 5); }                // ERROR_FILE_NOT_FOUND
 SHIM(RegCreateKeyExA) { if (ARG(c, 7)) P32(ARG(c, 7), 0x00060001); RET(c, 0, 9); }
 SHIM(RegQueryValueExA) { RET(c, 2, 6); }
+SHIM(RegQueryValueExW) { RET(c, 2, 6); }
 SHIM(RegSetValueExA) { RET(c, 0, 6); }
 SHIM(RegCloseKey) { RET(c, 0, 1); }
 SHIM(GetUserNameA) { const char *u = "Player"; strcpy((char *)MEM + ARG(c, 0), u); P32(ARG(c, 1), 7); RET(c, 1, 2); }
@@ -235,6 +249,32 @@ SHIM(CoCreateInstance) {
 
 // ---- winmm -------------------------------------------------------------------------------------
 SHIM(timeGetTime) { RET(c, (uint32_t)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000000ull), 0); }
+SHIM(timeBeginPeriod) { RET(c, 0, 1); }
+
+// ---- clipboard / window / gdiplus --------------------------------------------------------------
+SHIM(OpenClipboard) { RET(c, 1, 1); }
+SHIM(CloseClipboard) { RET(c, 1, 0); }
+SHIM(EmptyClipboard) { RET(c, 1, 0); }
+SHIM(GetClipboardData) { RET(c, 0, 1); }
+SHIM(SetClipboardData) { RET(c, ARG(c, 1), 2); }
+SHIM(GetWindowRect) {
+    uint32_t r = ARG(c, 1);
+    if (r) { P32(r, 0); P32(r + 4, 0); P32(r + 8, fnv_display_width()); P32(r + 12, fnv_display_height()); }
+    RET(c, r != 0, 2);
+}
+SHIM(SetWindowLongA) { RET(c, 0, 3); }
+SHIM(CallWindowProcA) { RET(c, 0, 5); }
+SHIM(ClipCursor) { RET(c, 1, 1); }
+
+SHIM(GdiplusStartup) { if (ARG(c, 0)) P32(ARG(c, 0), 1); RET(c, 0, 3); }
+SHIM(GdipAlloc) { RET(c, gmalloc(ARG(c, 0)), 1); }
+SHIM(GdipFree) { if (ARG(c, 0)) gfree(ARG(c, 0)); RET(c, 0, 1); }
+SHIM(GdipCreateBitmapFromGdiDib) { if (ARG(c, 2)) P32(ARG(c, 2), 0); RET(c, 1, 3); }
+SHIM(GdipCloneImage) { if (ARG(c, 1)) P32(ARG(c, 1), 0); RET(c, 1, 2); }
+SHIM(GdipDisposeImage) { RET(c, 0, 1); }
+SHIM(GdipGetImageEncodersSize) { if (ARG(c, 0)) P32(ARG(c, 0), 0); if (ARG(c, 1)) P32(ARG(c, 1), 0); RET(c, 0, 2); }
+SHIM(GdipGetImageEncoders) { RET(c, 0, 3); }
+SHIM(GdipSaveImageToFile) { RET(c, 1, 4); }
 
 SHIM_TABLE(win_shims,
     E(RegisterClassA) E(CreateWindowExA) E(DestroyWindow) E(ShowWindow) E(UpdateWindow) E(SetWindowPos)
@@ -242,12 +282,16 @@ SHIM_TABLE(win_shims,
     E(EnumChildWindows) E(FindWindowA) E(GetActiveWindow) E(GetForegroundWindow) E(GetFocus) E(SetForegroundWindow) E(GetClientRect)
     E(AdjustWindowRect) E(AdjustWindowRectEx) E(GetSystemMetrics) E(EnumDisplayDevicesA) E(LoadIconA)
     E(LoadCursorA) E(ShowCursor) E(GetDoubleClickTime) E(SwapMouseButton) E(GetAsyncKeyState)
-    E(GetKeyState) E(GetKeyboardLayout) E(MapVirtualKeyA) E(ToUnicode) E(GetCursorPos)
+    E(GetKeyState) E(GetKeyboardState) E(GetKeyboardLayout) E(MapVirtualKeyA) E(MapVirtualKeyExA) E(ToUnicode) E(ToUnicodeEx) E(GetCursorPos)
     E(GetDlgItem) E(GetWindowInfo) E(SendInput)
     E(SetWindowsHookExA) E(UnhookWindowsHookEx) E(CallNextHookEx) E(PeekMessageA) E(TranslateMessage)
     E(DispatchMessageA) E(SendMessageA) E(DefWindowProcA) E(MessageBoxA) E(GetStockObject)
     E(CreateDCA) E(ExtEscape) E(DeleteDC)
-    E(InitCommonControlsEx) E(ImageList_LoadImageA) E(ImageList_Destroy) E(RegOpenKeyExA) E(RegCreateKeyExA)
-    E(RegQueryValueExA) E(RegSetValueExA) E(RegCloseKey) E(GetUserNameA) E(SHGetFolderPathA) E(ShellExecuteA)
+    E(InitCommonControlsEx) E(ImageList_LoadImageA) E(ImageList_Destroy) E(RegOpenKeyExA) E(RegOpenKeyExW) E(RegCreateKeyExA)
+    E(RegQueryValueExA) E(RegQueryValueExW) E(RegSetValueExA) E(RegCloseKey) E(GetUserNameA) E(SHGetFolderPathA) E(ShellExecuteA)
     E(CommandLineToArgvW) E(CoInitialize) E(CoInitializeEx) E(CoUninitialize) E(CoFreeUnusedLibraries)
-    E(CoTaskMemAlloc) E(CoTaskMemFree) E(CoCreateInstance) E(timeGetTime))
+    E(CoTaskMemAlloc) E(CoTaskMemFree) E(CoCreateInstance) E(timeGetTime) E(timeBeginPeriod)
+    E(OpenClipboard) E(CloseClipboard) E(EmptyClipboard) E(GetClipboardData) E(SetClipboardData)
+    E(GetWindowRect) E(SetWindowLongA) E(CallWindowProcA) E(ClipCursor)
+    E(GdiplusStartup) E(GdipAlloc) E(GdipFree) E(GdipCreateBitmapFromGdiDib) E(GdipCloneImage)
+    E(GdipDisposeImage) E(GdipGetImageEncodersSize) E(GdipGetImageEncoders) E(GdipSaveImageToFile))

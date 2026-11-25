@@ -3,9 +3,10 @@
 #include <string.h>
 #include "../rt.h"
 
-#define MAX_IMPORTS 4096
+#define MAX_IMPORTS 16384
 #define IMPORT_THUNK_BASE 0xFEE00000u   // import slot i -> IMPORT_THUNK_BASE + 4*i (shared with difftest)
 #define HOST_EXIT_THUNK  0xFEDF0000u    // return address of the entry point: run finished
+#define MAX_TLS_MODULES 32
 enum { TRAP_IMPORT = 8 };
 
 typedef void (*ShimFn)(CPU *c);
@@ -19,9 +20,17 @@ const char *host_game_dir(void);
 
 ShimFn host_find_shim(const char *dll, const char *name);
 int host_shimmed_count(void);
+uint32_t host_bind_import(const char *dll, const char *name);
+uint32_t host_load_pe(const char *path);
+void host_bind_pe_imports(uint32_t base);
 void host_init_args(int argc, char **argv);
 void host_thread_init(CPU *c, uint32_t stack_size);
 void rt_import_call(CPU *c, uint32_t addr);
+int host_reserve_guest_range(uint32_t lo, uint32_t hi);
+int host_tls_register(uint32_t template_va, uint32_t template_size, uint32_t zero_fill, uint32_t index_va);
+void host_tls_populate_thread(uint32_t teb);
+int host_addr_is_executable(uint32_t addr);
+void host_sync_text_patches(void);
 
 // guest memory helpers
 extern uint8_t *host_tls_template;                // static TLS template (NULL: the image has none)

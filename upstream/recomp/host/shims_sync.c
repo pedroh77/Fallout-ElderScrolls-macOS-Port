@@ -8,6 +8,9 @@
 #include <unistd.h>
 #include "shims.h"
 
+__attribute__((weak)) void rt_call(CPU *c, uint32_t a) { (void)c; (void)a; }
+static pthread_mutex_t slist_lk = PTHREAD_MUTEX_INITIALIZER;
+
 // ---- handle table ----------------------------------------------------------------------------
 #define MAXH 65536
 static struct { int type; void *obj; } htab[MAXH];
@@ -26,6 +29,8 @@ void *handle_get(uint32_t h, int type) {
 int handle_type(uint32_t h) { uint32_t i = h / 4; return i < MAXH ? htab[i].type : 0; }
 void file_close_obj(void *obj) __attribute__((weak));
 void file_close_obj(void *obj) { (void)obj; }
+void mapping_close_obj(void *obj) __attribute__((weak));
+void mapping_close_obj(void *obj) { (void)obj; }
 
 static void *handle_detach(uint32_t h, int *type_out) {
     uint32_t i = h / 4;
@@ -47,6 +52,7 @@ void handle_close(uint32_t h) {
     int type = 0;
     void *obj = handle_detach(h, &type);
     if (type == H_FILE) file_close_obj(obj);
+    else if (type == H_MAPPING) mapping_close_obj(obj);
 }
 
 // ---- waitable objects ------------------------------------------------------------------------
@@ -232,6 +238,11 @@ SHIM(CreateEventW) {
     Obj *o = obj_new(); o->manual = (int)ARG(c, 1); o->signaled = (int)ARG(c, 2);
     RET(c, handle_new(H_EVENT, o), 4);
 }
+SHIM(CreateEventExW) {
+    uint32_t fl = ARG(c, 2);
+    Obj *o = obj_new(); o->manual = (fl & 1) != 0; o->signaled = (fl & 2) != 0;
+    RET(c, handle_new(H_EVENT, o), 4);
+}
 SHIM(OpenEventA) {
     uint32_t h = find_named(H_EVENT, GSTR(ARG(c, 2)));
     if (!h) SETERR(2);
@@ -248,6 +259,7 @@ SHIM(ResetEvent) {
     RET(c, o != NULL, 1);
 }
 SHIM(CreateSemaphoreA) { Obj *o = obj_new(); o->count = (int)ARG(c, 1); o->max = (int)ARG(c, 2); RET(c, handle_new(H_SEMA, o), 4); }
+SHIM(CreateSemaphoreExW) { Obj *o = obj_new(); o->count = (int)ARG(c, 1); o->max = (int)ARG(c, 2); RET(c, handle_new(H_SEMA, o), 6); }
 SHIM(ReleaseSemaphore) {
     Obj *o = handle_get(ARG(c, 0), H_SEMA); uint32_t prev = ARG(c, 2);
     if (!o) { RET(c, 0, 3); return; }
@@ -374,6 +386,274 @@ SHIM(EnterCriticalSection) {
 }
 SHIM(LeaveCriticalSection) { pthread_mutex_unlock(cs_get(ARG(c, 0))); RET(c, 0, 1); }
 SHIM(TryEnterCriticalSection) { RET(c, pthread_mutex_trylock(cs_get(ARG(c, 0))) == 0, 1); }
+SHIM(RtlInitializeCriticalSection) { memset(MEM + ARG(c, 0), 0, 24); cs_get(ARG(c, 0)); RET(c, 0, 1); }
+SHIM(RtlEnterCriticalSection) { EnterCriticalSection_(c); }
+SHIM(RtlLeaveCriticalSection) { LeaveCriticalSection_(c); }
+SHIM(RtlDeleteCriticalSection) { RET(c, 0, 1); }
+SHIM(RtlInitializeSListHead) { memset(MEM + ARG(c, 0), 0, 8); RET(c, 0, 1); }
+
+SHIM(InterlockedPushEntrySList) {
+    uint32_t head = ARG(c, 0), entry = ARG(c, 1);
+    pthread_mutex_lock(&slist_lk);
+    uint32_t old_next = G32(head);
+    uint16_t depth = 0, seq = 0;
+    memcpy(&depth, MEM + head + 4, 2);
+    memcpy(&seq, MEM + head + 6, 2);
+    P32(entry, old_next);
+    P32(head, entry);
+    depth++; seq++;
+    memcpy(MEM + head + 4, &depth, 2);
+    memcpy(MEM + head + 6, &seq, 2);
+    pthread_mutex_unlock(&slist_lk);
+    RET(c, old_next, 2);
+}
+SHIM(InterlockedFlushSList) {
+    uint32_t head = ARG(c, 0);
+    pthread_mutex_lock(&slist_lk);
+    uint32_t old_next = G32(head);
+    uint16_t zero = 0, seq = 0;
+    memcpy(&seq, MEM + head + 6, 2);
+    seq++;
+    P32(head, 0);
+    memcpy(MEM + head + 4, &zero, 2);
+    memcpy(MEM + head + 6, &seq, 2);
+    pthread_mutex_unlock(&slist_lk);
+    RET(c, old_next, 1);
+}
+
+// ---- SRWLock, ConditionVariable, InitOnce, Threadpool stubs -----------------------------------
+typedef struct SRWNode {
+    uint32_t addr;
+    pthread_mutex_t m;
+    pthread_cond_t cv;
+    int readers, writer, waiting_writers;
+    struct SRWNode *next;
+} SRWNode;
+static SRWNode *srw_tab[1024];
+static pthread_mutex_t srw_lk = PTHREAD_MUTEX_INITIALIZER;
+static SRWNode *srw_get(uint32_t a) {
+    uint32_t b = (a >> 2) % 1024;
+    pthread_mutex_lock(&srw_lk);
+    SRWNode *n = srw_tab[b];
+    while (n && n->addr != a) n = n->next;
+    if (!n) {
+        n = calloc(1, sizeof *n);
+        n->addr = a;
+        pthread_mutex_init(&n->m, NULL);
+        pthread_cond_init(&n->cv, NULL);
+        n->next = srw_tab[b];
+        srw_tab[b] = n;
+    }
+    pthread_mutex_unlock(&srw_lk);
+    return n;
+}
+static void srw_acq_excl(SRWNode *s) {
+    pthread_mutex_lock(&s->m);
+    s->waiting_writers++;
+    while (s->writer || s->readers > 0) pthread_cond_wait(&s->cv, &s->m);
+    s->waiting_writers--;
+    s->writer = 1;
+    pthread_mutex_unlock(&s->m);
+}
+static void srw_rel_excl(SRWNode *s) {
+    pthread_mutex_lock(&s->m);
+    s->writer = 0;
+    pthread_cond_broadcast(&s->cv);
+    pthread_mutex_unlock(&s->m);
+}
+static void srw_acq_shared(SRWNode *s) {
+    pthread_mutex_lock(&s->m);
+    while (s->writer || s->waiting_writers > 0) pthread_cond_wait(&s->cv, &s->m);
+    s->readers++;
+    pthread_mutex_unlock(&s->m);
+}
+static void srw_rel_shared(SRWNode *s) {
+    pthread_mutex_lock(&s->m);
+    if (--s->readers == 0) pthread_cond_broadcast(&s->cv);
+    pthread_mutex_unlock(&s->m);
+}
+SHIM(InitializeSRWLock) { P32(ARG(c, 0), 0); srw_get(ARG(c, 0)); RET(c, 0, 1); }
+SHIM(AcquireSRWLockExclusive) { srw_acq_excl(srw_get(ARG(c, 0))); RET(c, 0, 1); }
+SHIM(ReleaseSRWLockExclusive) { srw_rel_excl(srw_get(ARG(c, 0))); RET(c, 0, 1); }
+SHIM(AcquireSRWLockShared) { srw_acq_shared(srw_get(ARG(c, 0))); RET(c, 0, 1); }
+SHIM(ReleaseSRWLockShared) { srw_rel_shared(srw_get(ARG(c, 0))); RET(c, 0, 1); }
+SHIM(TryAcquireSRWLockExclusive) {
+    SRWNode *s = srw_get(ARG(c, 0)); int ok = 0;
+    pthread_mutex_lock(&s->m);
+    if (!s->writer && s->readers == 0) { s->writer = 1; ok = 1; }
+    pthread_mutex_unlock(&s->m);
+    RET(c, ok, 1);
+}
+SHIM(TryAcquireSRWLockShared) {
+    SRWNode *s = srw_get(ARG(c, 0)); int ok = 0;
+    pthread_mutex_lock(&s->m);
+    if (!s->writer && s->waiting_writers == 0) { s->readers++; ok = 1; }
+    pthread_mutex_unlock(&s->m);
+    RET(c, ok, 1);
+}
+
+typedef struct CVNode {
+    uint32_t addr;
+    pthread_mutex_t m;
+    pthread_cond_t cv;
+    struct CVNode *next;
+} CVNode;
+static CVNode *cv_tab[1024];
+static pthread_mutex_t cv_lk = PTHREAD_MUTEX_INITIALIZER;
+static CVNode *cv_get(uint32_t a) {
+    uint32_t b = (a >> 2) % 1024;
+    pthread_mutex_lock(&cv_lk);
+    CVNode *n = cv_tab[b];
+    while (n && n->addr != a) n = n->next;
+    if (!n) {
+        n = calloc(1, sizeof *n);
+        n->addr = a;
+        pthread_mutex_init(&n->m, NULL);
+        pthread_cond_init(&n->cv, NULL);
+        n->next = cv_tab[b];
+        cv_tab[b] = n;
+    }
+    pthread_mutex_unlock(&cv_lk);
+    return n;
+}
+SHIM(InitializeConditionVariable) { P32(ARG(c, 0), 0); cv_get(ARG(c, 0)); RET(c, 0, 1); }
+SHIM(WakeConditionVariable) {
+    CVNode *cv = cv_get(ARG(c, 0));
+    pthread_mutex_lock(&cv->m); pthread_cond_signal(&cv->cv); pthread_mutex_unlock(&cv->m);
+    RET(c, 0, 1);
+}
+SHIM(WakeAllConditionVariable) {
+    CVNode *cv = cv_get(ARG(c, 0));
+    pthread_mutex_lock(&cv->m); pthread_cond_broadcast(&cv->cv); pthread_mutex_unlock(&cv->m);
+    RET(c, 0, 1);
+}
+SHIM(SleepConditionVariableSRW) {
+    CVNode *cv = cv_get(ARG(c, 0));
+    SRWNode *s = srw_get(ARG(c, 1));
+    uint32_t ms = ARG(c, 2), flags = ARG(c, 3);
+    struct timespec ts; deadline(&ts, ms);
+    pthread_mutex_lock(&cv->m);
+    if (flags & 1) srw_rel_shared(s); else srw_rel_excl(s);
+    int r = (ms == 0xFFFFFFFFu) ? pthread_cond_wait(&cv->cv, &cv->m)
+            : (ms == 0) ? ETIMEDOUT : pthread_cond_timedwait(&cv->cv, &cv->m, &ts);
+    pthread_mutex_unlock(&cv->m);
+    if (flags & 1) srw_acq_shared(s); else srw_acq_excl(s);
+    if (r == ETIMEDOUT) { SETERR(1460); RET(c, 0, 4); return; }
+    RET(c, 1, 4);
+}
+SHIM(SleepConditionVariableCS) {
+    CVNode *cv = cv_get(ARG(c, 0));
+    pthread_mutex_t *cs = cs_get(ARG(c, 1));
+    uint32_t ms = ARG(c, 2);
+    struct timespec ts; deadline(&ts, ms);
+    pthread_mutex_lock(&cv->m);
+    pthread_mutex_unlock(cs);
+    int r = (ms == 0xFFFFFFFFu) ? pthread_cond_wait(&cv->cv, &cv->m)
+            : (ms == 0) ? ETIMEDOUT : pthread_cond_timedwait(&cv->cv, &cv->m, &ts);
+    pthread_mutex_unlock(&cv->m);
+    pthread_mutex_lock(cs);
+    if (r == ETIMEDOUT) { SETERR(1460); RET(c, 0, 3); return; }
+    RET(c, 1, 3);
+}
+
+typedef struct { uint32_t addr, done, ctx; } InitOnceEntry;
+static InitOnceEntry init_once_tab[256];
+static int init_once_count;
+static pthread_mutex_t init_once_lk = PTHREAD_MUTEX_INITIALIZER;
+SHIM(InitOnceExecuteOnce) {
+    uint32_t once = ARG(c, 0), fn = ARG(c, 1), param = ARG(c, 2), ctx = ARG(c, 3);
+    pthread_mutex_lock(&init_once_lk);
+    InitOnceEntry *ent = NULL;
+    for (int i = 0; i < init_once_count; i++) {
+        if (init_once_tab[i].addr == once) { ent = &init_once_tab[i]; break; }
+    }
+    if (!ent && init_once_count < 256) {
+        ent = &init_once_tab[init_once_count++];
+        ent->addr = once;
+    }
+    if (ent && ent->done) {
+        if (ctx) P32(ctx, ent->ctx);
+        pthread_mutex_unlock(&init_once_lk);
+        RET(c, 1, 4);
+        return;
+    }
+    pthread_mutex_unlock(&init_once_lk);
+    uint32_t esp = REG(c, R_ESP), sp = esp - 64;
+    uint32_t tmp_ctx = sp + 32;
+    P32(tmp_ctx, ctx ? G32(ctx) : 0);
+    P32(sp, HOST_EXIT_THUNK); P32(sp + 4, once); P32(sp + 8, param); P32(sp + 12, tmp_ctx);
+    SETREG(c, R_ESP, sp);
+    rt_call(c, fn);
+    uint32_t ok = REG(c, R_EAX);
+    SETREG(c, R_ESP, esp);
+    uint32_t out_ctx = G32(tmp_ctx);
+    if (ctx) P32(ctx, out_ctx);
+    if (ok && ent) {
+        pthread_mutex_lock(&init_once_lk);
+        ent->done = 1; ent->ctx = out_ctx;
+        P32(once, 2);
+        pthread_mutex_unlock(&init_once_lk);
+    }
+    RET(c, ok != 0, 4);
+}
+
+static struct { uint32_t fn, ctx; int active; } tp_works[256];
+static pthread_mutex_t tp_lk = PTHREAD_MUTEX_INITIALIZER;
+SHIM(CreateThreadpoolWork) {
+    uint32_t fn = ARG(c, 0), ctx = ARG(c, 1);
+    uint32_t h = 0;
+    pthread_mutex_lock(&tp_lk);
+    for (int i = 0; i < 256; i++) {
+        if (!tp_works[i].active) {
+            tp_works[i].fn = fn;
+            tp_works[i].ctx = ctx;
+            tp_works[i].active = 1;
+            h = 0x00071000u + (uint32_t)i;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&tp_lk);
+    RET(c, h ? h : 0x00070001u, 3);
+}
+SHIM(SubmitThreadpoolWork) {
+    uint32_t h = ARG(c, 0), fn = 0, ctx = 0;
+    if (h >= 0x00071000u && h < 0x00071100u) {
+        pthread_mutex_lock(&tp_lk);
+        uint32_t idx = h - 0x00071000u;
+        if (tp_works[idx].active) { fn = tp_works[idx].fn; ctx = tp_works[idx].ctx; }
+        pthread_mutex_unlock(&tp_lk);
+    }
+    if (fn) {
+        uint32_t esp = REG(c, R_ESP);
+        uint32_t sp = esp - 64;
+        P32(sp, HOST_EXIT_THUNK);
+        P32(sp + 4, 0);
+        P32(sp + 8, ctx);
+        P32(sp + 12, h);
+        SETREG(c, R_ESP, sp);
+        rt_call(c, fn);
+        SETREG(c, R_ESP, esp);
+    }
+    RET(c, 0, 1);
+}
+SHIM(WaitForThreadpoolWorkCallbacks) { RET(c, 0, 2); }
+SHIM(CloseThreadpoolWork) {
+    uint32_t h = ARG(c, 0);
+    if (h >= 0x00071000u && h < 0x00071100u) {
+        pthread_mutex_lock(&tp_lk);
+        tp_works[h - 0x00071000u].active = 0;
+        pthread_mutex_unlock(&tp_lk);
+    }
+    RET(c, 0, 1);
+}
+SHIM(CreateThreadpoolTimer) { RET(c, 0x00070002u, 3); }
+SHIM(SetThreadpoolTimer) { RET(c, 0, 4); }
+SHIM(WaitForThreadpoolTimerCallbacks) { RET(c, 0, 2); }
+SHIM(CloseThreadpoolTimer) { RET(c, 0, 1); }
+SHIM(CreateThreadpoolWait) { RET(c, 0x00070003u, 3); }
+SHIM(SetThreadpoolWait) { RET(c, 0, 3); }
+SHIM(CloseThreadpoolWait) { RET(c, 0, 1); }
+SHIM(FreeLibraryWhenCallbackReturns) { RET(c, 0, 2); }
 
 // interlocked: real atomics on guest memory (with mutex fallback for unaligned guest addresses on ARM64)
 static pthread_mutex_t unaligned_ilock = PTHREAD_MUTEX_INITIALIZER;
@@ -506,6 +786,11 @@ SHIM(ExitThread) {
     if(current_thread)current_thread->exit_code=code;
     pthread_exit(NULL);
 }
+SHIM(FreeLibraryAndExitThread) {
+    uint32_t code=ARG(c,1);
+    if(current_thread)current_thread->exit_code=code;
+    pthread_exit(NULL);
+}
 SHIM(CloseHandle) {
     uint32_t h = ARG(c, 0);
     if (handle_type(h) == H_THREAD) {
@@ -521,13 +806,51 @@ SHIM(CloseHandle) {
     handle_close(h); RET(c, 1, 1);
 }
 
+SHIM(WaitOnAddress) {
+    uint32_t addr = ARG(c, 0), cmp = ARG(c, 1), sz = ARG(c, 2), ms = ARG(c, 3);
+    if (!addr || !cmp || (sz != 1 && sz != 2 && sz != 4 && sz != 8)) {
+        SETERR(87);
+        RET(c, 0, 4);
+        return;
+    }
+    struct timespec start;
+    if (ms != 0xFFFFFFFFu) clock_gettime(CLOCK_MONOTONIC, &start);
+    for (;;) {
+        uint64_t cur = 0, want = 0;
+        memcpy(&cur, MEM + addr, sz);
+        memcpy(&want, MEM + cmp, sz);
+        if (cur != want) { RET(c, 1, 4); return; }
+        if (ms == 0) { SETERR(1460); RET(c, 0, 4); return; }
+        if (ms != 0xFFFFFFFFu) {
+            struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+            int64_t el_ms = ((int64_t)(now.tv_sec - start.tv_sec) * 1000ll) + ((now.tv_nsec - start.tv_nsec) / 1000000ll);
+            if (el_ms >= (int64_t)ms) { SETERR(1460); RET(c, 0, 4); return; }
+        }
+        usleep(100);
+    }
+}
+SHIM(WakeByAddressSingle) { (void)ARG(c, 0); RET(c, 0, 1); }
+SHIM(WakeByAddressAll) { (void)ARG(c, 0); RET(c, 0, 1); }
+
 SHIM_TABLE(sync_shims,
-    E(CreateEventA) E(CreateEventW) E(OpenEventA) E(SetEvent) E(ResetEvent) E(CreateSemaphoreA) E(ReleaseSemaphore)
+    E(CreateEventA) E(CreateEventW) E(CreateEventExW) E(OpenEventA) E(SetEvent) E(ResetEvent)
+    E(CreateSemaphoreA) E(CreateSemaphoreExW) E(ReleaseSemaphore)
     E(CreateMutexA) E(OpenMutexA) E(ReleaseMutex) E(SleepEx)
     E(WaitForSingleObject) E(WaitForSingleObjectEx) E(WaitForMultipleObjects) E(InitializeCriticalSection)
     E(InitializeCriticalSectionAndSpinCount) E(InitializeCriticalSectionEx) E(InitializeSListHead)
     E(DeleteCriticalSection) E(EnterCriticalSection)
-    E(LeaveCriticalSection) E(TryEnterCriticalSection) E(InterlockedIncrement) E(InterlockedDecrement)
+    E(LeaveCriticalSection) E(TryEnterCriticalSection)
+    E(RtlInitializeCriticalSection) E(RtlEnterCriticalSection) E(RtlLeaveCriticalSection) E(RtlDeleteCriticalSection)
+    E(RtlInitializeSListHead) E(InterlockedPushEntrySList) E(InterlockedFlushSList)
+    E(InitializeSRWLock) E(AcquireSRWLockExclusive) E(ReleaseSRWLockExclusive)
+    E(AcquireSRWLockShared) E(ReleaseSRWLockShared) E(TryAcquireSRWLockExclusive) E(TryAcquireSRWLockShared)
+    E(InitializeConditionVariable) E(WakeConditionVariable) E(WakeAllConditionVariable)
+    E(SleepConditionVariableSRW) E(SleepConditionVariableCS) E(InitOnceExecuteOnce)
+    E(CreateThreadpoolWork) E(SubmitThreadpoolWork) E(WaitForThreadpoolWorkCallbacks) E(CloseThreadpoolWork)
+    E(CreateThreadpoolTimer) E(SetThreadpoolTimer) E(WaitForThreadpoolTimerCallbacks) E(CloseThreadpoolTimer)
+    E(CreateThreadpoolWait) E(SetThreadpoolWait) E(CloseThreadpoolWait) E(FreeLibraryWhenCallbackReturns)
+    E(WaitOnAddress) E(WakeByAddressSingle) E(WakeByAddressAll)
+    E(InterlockedIncrement) E(InterlockedDecrement)
     E(InterlockedExchange) E(InterlockedExchangeAdd) E(InterlockedCompareExchange) E(CreateThread)
     E(ResumeThread) E(SuspendThread) E(SetThreadPriority) E(SetThreadIdealProcessor) E(GetExitCodeThread)
-    E(ExitThread) E(CloseHandle))
+    E(ExitThread) E(FreeLibraryAndExitThread) E(CloseHandle))

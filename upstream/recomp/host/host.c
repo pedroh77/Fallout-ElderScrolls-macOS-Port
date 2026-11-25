@@ -62,9 +62,42 @@ static uint16_t rd16(uint32_t a) { uint16_t v; memcpy(&v, MEM + a, 2); return v;
 // ---- imports ---------------------------------------------------------------------------------
 HostImport host_imports[MAX_IMPORTS];
 int host_import_count;
+static pthread_mutex_t import_lk = PTHREAD_MUTEX_INITIALIZER;
 void host_sync_boundary(CPU *c);
 
-static void bind_imports(uint32_t base) {
+uint32_t host_bind_import(const char *dll, const char *name) {
+    ShimFn fn = host_find_shim(dll, name);
+    pthread_mutex_lock(&import_lk);
+    if (fn) {
+        for (int i = 0; i < host_import_count; i++) {
+            if (host_imports[i].fn == fn) {
+                pthread_mutex_unlock(&import_lk);
+                return IMPORT_THUNK_BASE + 4u * (uint32_t)i;
+            }
+        }
+    } else {
+        for (int i = 0; i < host_import_count; i++) {
+            if (!strcasecmp(host_imports[i].dll, dll) && !strcmp(host_imports[i].name, name)) {
+                pthread_mutex_unlock(&import_lk);
+                return IMPORT_THUNK_BASE + 4u * (uint32_t)i;
+            }
+        }
+    }
+    if (host_import_count >= MAX_IMPORTS) {
+        pthread_mutex_unlock(&import_lk);
+        fprintf(stderr, "[host] import table overflow (%d)\n", MAX_IMPORTS);
+        abort();
+    }
+    int slot = host_import_count++;
+    HostImport *hi = &host_imports[slot];
+    snprintf(hi->dll, sizeof hi->dll, "%s", dll);
+    snprintf(hi->name, sizeof hi->name, "%s", name);
+    hi->fn = fn;
+    pthread_mutex_unlock(&import_lk);
+    return IMPORT_THUNK_BASE + 4u * (uint32_t)slot;
+}
+
+void host_bind_pe_imports(uint32_t base) {
     uint32_t pe = base + rd32(base + 0x3C);
     uint32_t imp = rd32(pe + 24 + 96 + 8);
     if (!imp) return;
@@ -74,14 +107,11 @@ static void bind_imports(uint32_t base) {
         uint32_t iat = base + rd32(d + 16);
         for (; rd32(ilt); ilt += 4, iat += 4) {
             uint32_t e = rd32(ilt);
-            HostImport *hi = &host_imports[host_import_count];
-            snprintf(hi->dll, sizeof hi->dll, "%s", dll);
-            if (e & 0x80000000u) snprintf(hi->name, sizeof hi->name, "#%u", e & 0xFFFF);
-            else snprintf(hi->name, sizeof hi->name, "%s", (const char *)MEM + base + e + 2);
-            hi->fn = host_find_shim(hi->dll, hi->name);
-            uint32_t thunk = IMPORT_THUNK_BASE + 4 * host_import_count;
+            char name_buf[128];
+            if (e & 0x80000000u) snprintf(name_buf, sizeof name_buf, "#%u", e & 0xFFFF);
+            else snprintf(name_buf, sizeof name_buf, "%s", (const char *)MEM + base + e + 2);
+            uint32_t thunk = host_bind_import(dll, name_buf);
             memcpy(MEM + iat, &thunk, 4);
-            host_import_count++;
         }
     }
 }
@@ -107,7 +137,21 @@ void rt_import_call(CPU *c, uint32_t addr) {
 }
 
 // ---- loader ----------------------------------------------------------------------------------
-static uint32_t load_pe(const char *path) {
+__attribute__((weak)) int pe_addr_in_module(uint32_t addr) { (void)addr; return 0; }
+__attribute__((weak)) int host_addr_in_exec_va(uint32_t addr) { (void)addr; return 0; }
+__attribute__((weak)) int pe_can_locate_dll(const char *name_or_path) { (void)name_or_path; return 0; }
+__attribute__((weak)) uint32_t pe_load_dll(CPU *c, const char *name_or_path, const char *parent_host_dir) {
+    (void)c; (void)name_or_path; (void)parent_host_dir; return 0;
+}
+
+int host_addr_is_executable(uint32_t addr) {
+    if (addr >= host_text_start && addr < host_text_end) return 1;
+    if (pe_addr_in_module(addr)) return 1;
+    if (host_addr_in_exec_va(addr)) return 1;
+    return 0;
+}
+
+uint32_t host_load_pe(const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) { perror(path); exit(1); }
     fseek(f, 0, SEEK_END);
@@ -141,9 +185,9 @@ static uint32_t load_pe(const char *path) {
         host_tls_block_size = host_tls_template_size + td[4];
         host_tls_template = malloc(host_tls_template_size + 1);
         memcpy(host_tls_template, MEM + td[0], host_tls_template_size);
-        P32(td[2], 0);                                                    // our module's TLS index
+        int idx = host_tls_register(td[0], host_tls_template_size, td[4], td[2]);
         uint32_t cb = td[3] ? G32(td[3]) : 0;
-        fprintf(stderr, "[host] static TLS: %u-byte template + %u zero-fill%s\n", host_tls_template_size, td[4],
+        fprintf(stderr, "[host] static TLS[%d]: %u-byte template + %u zero-fill%s\n", idx, host_tls_template_size, td[4],
                 cb ? " (TLS callbacks present: NOT run)" : "");
     }
     free(d);
@@ -196,6 +240,50 @@ static void install_fault_handler(void) {
     sigaction(SIGSEGV, &sa, NULL);
 }
 
+#if !defined(FNV_GAME_FALLOUT3) && !defined(FNV_GAME_SKYRIM)
+static void nvse_on_winmain_entry(CPU *c, uint32_t addr) {
+    (void)addr;
+    CPU saved = *c;
+    SETREG(c, R_ESP, REG(c, R_ESP) - 128u);
+    uint32_t mod = pe_load_dll(c, "nvse_1_4.dll", NULL);
+    *c = saved;
+    host_sync_text_patches();
+    if (mod) {
+        fprintf(stderr, "[nvse] loaded nvse_1_4.dll @%#x (%u function groups deoptimized, %u dynamic call/push-hooked)\n",
+                mod, rt_patched_group_count(), rt_dyn_group_count());
+    } else {
+        fprintf(stderr, "[nvse] failed to load nvse_1_4.dll; continuing vanilla\n");
+    }
+}
+
+static void host_arm_nvse_boot(void) {
+    if (!rt_has_fallback()) return;
+    const char *env = getenv("FNV_NVSE");
+    if (env && !strcmp(env, "0")) {
+        fprintf(stderr, "[nvse] disabled via FNV_NVSE=0\n");
+        return;
+    }
+    if (!pe_can_locate_dll("nvse_1_4.dll")) {
+        if (env && !strcmp(env, "1")) {
+            fprintf(stderr, "[nvse] FNV_NVSE=1 requested, but nvse_1_4.dll was not found\n");
+        }
+        return;
+    }
+    if (host_image_base != 0x00400000u || host_text_end <= 0x00ECC470u || MEM[0x00ECC46Bu] != 0xE8u) {
+        fprintf(stderr, "[nvse] unexpected PE layout (base=%#x text_end=%#x); skipping hook\n",
+                host_image_base, host_text_end);
+        return;
+    }
+    uint32_t winmain = 0x00ECC46Bu + 5u + G32(0x00ECC46Bu + 1u);
+    if (winmain != 0x0086a850u) {
+        fprintf(stderr, "[nvse] unexpected WinMain target %#x; skipping hook\n", winmain);
+        return;
+    }
+    rt_set_boot_hook(winmain, nvse_on_winmain_entry);
+    fprintf(stderr, "[nvse] armed WinMain boot hook @%#x\n", winmain);
+}
+#endif
+
 int fnv_run_game(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: %s game.exe [args]\n", argv[0]); return 2; }
     install_fault_handler();
@@ -206,8 +294,11 @@ int fnv_run_game(int argc, char **argv) {
     // (a CLI process otherwise starts at default QoS and can land on efficiency cores)
     if (!getenv("FNV_NO_QOS")) pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
     host_init_args(argc - 1, argv + 1);
-    uint32_t entry = load_pe(argv[1]);
-    bind_imports(host_image_base);
+    uint32_t entry = host_load_pe(argv[1]);
+    host_bind_pe_imports(host_image_base);
+#if !defined(FNV_GAME_FALLOUT3) && !defined(FNV_GAME_SKYRIM)
+    host_arm_nvse_boot();
+#endif
     fprintf(stderr, "[host] image @%#x, entry %#x, %d imports (%d shimmed)\n", host_image_base, entry,
             host_import_count, host_shimmed_count());
 

@@ -223,6 +223,9 @@ Additional flags:
 # Fallout 3 — opt into Steam launcher & Overlay (standalone offline by default)
 ./quick-install.sh --with-steam
 
+# Fallout: New Vegas — bundle xNVSE 6.4.9 + official Microsoft x86 C/C++ runtime (opt-in)
+./quick-install.sh --game fnv --with-nvse
+
 # Non-interactive DRM strip (Fallout 3 / FNV), wrap output in .dmg, or keep build cache
 ./quick-install.sh --unpack-drm --dmg
 ./quick-install.sh --keep-cache   # or FNV_KEEP_CACHE=1 / SKYRIM_KEEP_CACHE=1
@@ -242,7 +245,11 @@ Holding `Option` on launch (or leaving "Skip launcher" unchecked) opens the nati
 * **Upscaler / Anti-Aliasing / Render Scale:** `MetalFX Spatial` or `Bilinear`; `Off`, `SMAA`, or `FXAA`; `50–100 %` internal render scale.
 * **Field of View:** Presets `Original (75° / 55°)`, `Expanded (90° / 60°)`, `Wide (100° / 65°)`, `Custom`, or `Keep FALLOUT.INI`, synchronized with **World FOV** (`75°–105°`, `fDefaultWorldFOV`) and **1st-Person FOV** (`55°–75°`, `fDefault1stPersonFOV`).
 * **Window / Mouse:** Fullscreen toggle and Disable macOS mouse acceleration toggle (on by default).
-* **Environment overrides:** `FNV_PRESET=keep|low|medium|high|ultra`, `FNV_RENDER_SCALE=50..100`, `FNV_UPSCALER=metalfx|bilinear`, `FNV_AA=off|smaa|fxaa`, `FNV_FOV=75..105`, `FNV_1ST_PERSON_FOV=55..75`, `FNV_MOUSE_ACCEL=0|1`, `FNV_WINDOWED=1`, `FNV_NOVSYNC=1`, `FNV_OUTPUT_WIDTH`/`FNV_OUTPUT_HEIGHT`, `FNV_SKIP_LAUNCHER=1`, `FNV_STEAM_NO_OVERLAY=1`, `FNV_STEAM_DISABLE=1`, `FNV_USER_DIR`, `FNV_ROOT`.
+* **xNVSE & Plugins (Fallout: New Vegas, Opt-In):**
+  * Build with `./quick-install.sh --game fnv --with-nvse` to download official **xNVSE 6.4.9** and the official **Microsoft x86 VCLibs / UCRT** runtime DLLs at build time (all SHA-256 verified; nothing proprietary is stored in git) into `Fallout New Vegas.app/Contents/Resources/GameData/NVSE/runtime/`.
+  * Place NVSE plugins (`.dll` / `.ini`) in the persistent folder `~/Library/Application Support/FalloutNV/NVSE/Plugins/`.
+  * Toggle xNVSE per-launch in the Options window (**Enable xNVSE**, with an **Open Plugins…** button) or via `FNV_NVSE=0|1`. Any game function patched by NVSE or plugins falls back from native ARM64 to Unicorn x86 emulation, trading a small amount of CPU headroom compared to vanilla 60 fps.
+* **Environment overrides:** `FNV_PRESET=keep|low|medium|high|ultra`, `FNV_RENDER_SCALE=50..100`, `FNV_UPSCALER=metalfx|bilinear`, `FNV_AA=off|smaa|fxaa`, `FNV_FOV=75..105`, `FNV_1ST_PERSON_FOV=55..75`, `FNV_MOUSE_ACCEL=0|1`, `FNV_WINDOWED=1`, `FNV_NOVSYNC=1`, `FNV_OUTPUT_WIDTH`/`FNV_OUTPUT_HEIGHT`, `FNV_SKIP_LAUNCHER=1`, `FNV_STEAM_NO_OVERLAY=1`, `FNV_STEAM_DISABLE=1`, `FNV_NVSE=0|1`, `FNV_NVSE_PLUGINS_DIR`, `FNV_USER_DIR`, `FNV_ROOT`.
 
 ### Skyrim (`OptionsSkyrim.m`)
 

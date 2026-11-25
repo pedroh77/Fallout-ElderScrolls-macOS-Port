@@ -13,12 +13,13 @@ extern _Thread_local uint32_t host_last_error;
 
 // Windows path -> host path (backslashes, drive letters, the game root)
 void host_path(const char *win, char *out, size_t n);
+void host_existing_path_case(const char *path, char *out, size_t n);
 // UTF-16 guest string helpers
 void w2a(uint32_t w, char *out, size_t n);
 uint32_t wlen(uint32_t w);
 
 // handles
-enum { H_FILE = 1, H_FIND, H_EVENT, H_SEMA, H_MUTEX, H_THREAD };
+enum { H_FILE = 1, H_FIND, H_EVENT, H_SEMA, H_MUTEX, H_THREAD, H_MAPPING };
 uint32_t handle_new(int type, void *obj);
 void *handle_get(uint32_t h, int type);
 int handle_type(uint32_t h);

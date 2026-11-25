@@ -139,6 +139,30 @@ void rt_calltrace_dump(void);
 enum { TRAP_NOFN = 6, TRAP_INT3 = 7 };
 void rt_call(CPU *c, uint32_t guest_addr);   // dispatch an indirect call / tail jump
 void rt_fallback(CPU *c, uint32_t guest_addr);   // no native code: interpret (host) or trap (tests)
+// Packed dynamic-patch site entry: bits 0..29 = VA (< 0x40000000),
+// bits 30..31 = kind: 0 = CALL rel32 (5B, 0xE8), 1 = PUSH imm8 (2B, 0x6A), 2 = PUSH imm32 (5B, 0x68).
+#define RT_SITE_ADDR(x) ((x) & 0x3FFFFFFFu)
+#define RT_SITE_KIND(x) ((x) >> 30)
+enum { RT_SITE_CALL5 = 0u, RT_SITE_PUSH2 = 1u, RT_SITE_PUSH5 = 2u };
+typedef struct { uint32_t lo, hi, group; } RtFnRange;
+extern uint8_t rt_fn_patched[];
+static inline uint8_t rt_group_state(uint32_t gid) {
+    return __atomic_load_n(&rt_fn_patched[gid], __ATOMIC_RELAXED);
+}
+static inline int rt_is_patched_group(uint32_t gid) {
+    return __builtin_expect(rt_group_state(gid) == 1u, 0);
+}
+void rt_notify_code_patch(uint32_t addr, uint32_t size);
+void rt_notify_dyn_patch(uint32_t addr, uint32_t size);
+int rt_dyn_site_covers(uint32_t addr, uint32_t *out_site, uint32_t *out_kind);
+uint64_t rt_patch_epoch(void);
+uint32_t rt_patched_group_count(void);
+uint32_t rt_dyn_group_count(void);
+int rt_collect_patched_ranges(uint32_t text_lo, uint32_t text_hi, uint32_t *out_lo, uint32_t *out_hi, int cap);
+typedef void (*RtBootHookFn)(CPU *c, uint32_t addr);
+void rt_set_boot_hook(uint32_t addr, RtBootHookFn fn);
+void rt_run_boot_hook_if_armed(CPU *c, uint32_t addr);
+int rt_has_fallback(void);
 uint64_t rt_rdtsc(void);
 void rt_cpuid(CPU *c);
 
@@ -163,6 +187,44 @@ typedef int64_t SV;
 static inline V MASKV(int n) { return n >= 8 ? ~(V)0 : (((V)1 << (8 * n)) - 1); }
 static inline V LDV(const uint8_t *p, int n) { V v = 0; memcpy(&v, p, n); return v; }
 static inline void STV(uint8_t *p, V v, int n) { memcpy(p, &v, n); }
+static inline int rt_is_nop2(const uint8_t *p) {
+    return (p[0] == 0x66u && p[1] == 0x90u) || (p[0] == 0x90u && p[1] == 0x90u);
+}
+static inline int rt_is_nop3(const uint8_t *p) {
+    return (p[0] == 0x0Fu && p[1] == 0x1Fu && p[2] == 0x00u) ||
+           (p[0] == 0x90u && p[1] == 0x90u && p[2] == 0x90u) ||
+           (p[0] == 0x66u && p[1] == 0x90u && p[2] == 0x90u) ||
+           (p[0] == 0x90u && p[1] == 0x66u && p[2] == 0x90u);
+}
+static inline int rt_is_valid_call5_bytes(const uint8_t *p) {
+    uint8_t op = p[0];
+    if (op == 0xE8u) return 1;
+    if (op >= 0xB8u && op <= 0xBFu && op != 0xBCu) return 1; // MOV r32, imm32 (not ESP)
+    if ((op == 0x90u && p[1] == 0x90u && p[2] == 0x90u && p[3] == 0x90u && p[4] == 0x90u) ||
+        (op == 0x0Fu && p[1] == 0x1Fu && p[2] == 0x44u && p[3] == 0x00u && p[4] == 0x00u) ||
+        (op == 0x66u && p[1] == 0x0Fu && p[2] == 0x1Fu && p[3] == 0x40u && p[4] == 0x00u)) {
+        return 1; // 5-byte NOP
+    }
+    if ((op == 0x89u || op == 0x8Bu) && p[1] >= 0xC0u) {
+        uint8_t dst = (op == 0x8Bu) ? ((p[1] >> 3) & 7u) : (p[1] & 7u);
+        return dst != 4u && rt_is_nop3(p + 2);
+    }
+    if (op == 0x8Bu && (p[1] & 0xC0u) == 0x40u) {
+        uint8_t reg = (p[1] >> 3) & 7u, rm = p[1] & 7u;
+        return rm != 4u && reg != 4u && rt_is_nop2(p + 3);
+    }
+    if (op == 0x8Bu && (p[1] & 0xC0u) == 0x00u) {
+        uint8_t reg = (p[1] >> 3) & 7u, rm = p[1] & 7u;
+        return rm != 4u && rm != 5u && reg != 4u && rt_is_nop3(p + 2);
+    }
+    return 0;
+}
+static inline V rt_push_imm8(uint32_t site) {
+    return (V)(uint32_t)(int32_t)(int8_t)MEM[site + 1u];
+}
+static inline V rt_push_imm32(uint32_t site) {
+    return (V)(uint32_t)LDV(MEM + site + 1u, 4);
+}
 static inline SV SXV(V v, int n) { int s = 64 - 8 * n; return (SV)(v << s) >> s; }
 static inline V SHLV(V a, V b, int n) { return b >= (V)(8 * n) ? 0 : (a << b) & MASKV(n); }
 static inline V SHRV(V a, V b, int n) { return b >= (V)(8 * n) ? 0 : (a & MASKV(n)) >> b; }
@@ -241,6 +303,35 @@ static inline void STM(uint32_t a, V v, int n) {
 #endif
 static inline U LDMW(uint32_t a, int n) { U v = 0; memcpy(&v, MEM + a, n); __atomic_thread_fence(__ATOMIC_ACQUIRE); return v; }
 static inline void STMW(uint32_t a, U v, int n) { __atomic_thread_fence(__ATOMIC_RELEASE); memcpy(MEM + a, &v, n); }
+static inline void rt_call_rel32(CPU *c, uint32_t site, uint32_t orig_target, GuestFn orig_fn) {
+    const uint8_t *p = MEM + site;
+    uint8_t op = p[0];
+    if (__builtin_expect(op == 0xE8u, 1)) {
+        int32_t rel = (int32_t)(uint32_t)LDV(p + 1u, 4);
+        uint32_t target = site + 5u + (uint32_t)rel;
+        if (__builtin_expect(target == orig_target, 1)) orig_fn(c);
+        else rt_call(c, target);
+        return;
+    }
+    uint32_t esp = (uint32_t)LDV(c->r + 16, 4);
+    STV(c->r + 16, (V)(esp + 4u), 4);
+    if (op >= 0xB8u && op <= 0xBFu && op != 0xBCu) {
+        STV(c->r + 4u * (op - 0xB8u), LDV(p + 1u, 4), 4);
+    } else if ((op == 0x89u || op == 0x8Bu) && p[1] >= 0xC0u) {
+        uint8_t reg = (p[1] >> 3) & 7u, rm = p[1] & 7u;
+        uint8_t dst = (op == 0x8Bu) ? reg : rm;
+        uint8_t src = (op == 0x8Bu) ? rm : reg;
+        STV(c->r + 4u * dst, LDV(c->r + 4u * src, 4), 4);
+    } else if (op == 0x8Bu && (p[1] & 0xC0u) == 0x40u && (p[1] & 7u) != 4u) {
+        uint8_t reg = (p[1] >> 3) & 7u, rm = p[1] & 7u;
+        uint32_t ea = (uint32_t)LDV(c->r + 4u * rm, 4) + (uint32_t)(int32_t)(int8_t)p[2];
+        STV(c->r + 4u * reg, LDM(ea, 4), 4);
+    } else if (op == 0x8Bu && (p[1] & 0xC0u) == 0x00u && (p[1] & 7u) != 4u && (p[1] & 7u) != 5u) {
+        uint8_t reg = (p[1] >> 3) & 7u, rm = p[1] & 7u;
+        uint32_t ea = (uint32_t)LDV(c->r + 4u * rm, 4);
+        STV(c->r + 4u * reg, LDM(ea, 4), 4);
+    }
+}
 void rt_lock(void);
 // RT_X87CHECK: report calls / returns made with more x87 values live than the ABI allows
 #ifdef RT_X87CHECK

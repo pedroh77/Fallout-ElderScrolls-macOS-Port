@@ -72,12 +72,28 @@ SHIM(CompareStringA) {
     RET(c, r < 0 ? 1 : r > 0 ? 3 : 2, 6);
 }
 SHIM(CompareStringW) {
-    uint32_t a = ARG(c, 2), b = ARG(c, 4); int32_t na = (int32_t)ARG(c, 3), nb = (int32_t)ARG(c, 5);
+    uint32_t fl = ARG(c, 1), a = ARG(c, 2), b = ARG(c, 4); int32_t na = (int32_t)ARG(c, 3), nb = (int32_t)ARG(c, 5);
     if (na < 0) na = (int32_t)wlen(a); if (nb < 0) nb = (int32_t)wlen(b);
     int r = 0;
-    for (int32_t i = 0; !r && i < na && i < nb; i++) { uint16_t x, y; memcpy(&x, MEM + a + 2 * i, 2); memcpy(&y, MEM + b + 2 * i, 2); r = (int)x - (int)y; }
+    for (int32_t i = 0; !r && i < na && i < nb; i++) {
+        uint16_t x, y; memcpy(&x, MEM + a + 2 * i, 2); memcpy(&y, MEM + b + 2 * i, 2);
+        if ((fl & 1) && x < 128 && y < 128) { x = (uint16_t)tolower(x); y = (uint16_t)tolower(y); }
+        r = (int)x - (int)y;
+    }
     if (!r) r = na - nb;
     RET(c, r < 0 ? 1 : r > 0 ? 3 : 2, 6);
+}
+SHIM(CompareStringEx) {
+    uint32_t fl = ARG(c, 1), a = ARG(c, 2), b = ARG(c, 4); int32_t na = (int32_t)ARG(c, 3), nb = (int32_t)ARG(c, 5);
+    if (na < 0) na = (int32_t)wlen(a); if (nb < 0) nb = (int32_t)wlen(b);
+    int r = 0;
+    for (int32_t i = 0; !r && i < na && i < nb; i++) {
+        uint16_t x, y; memcpy(&x, MEM + a + 2 * i, 2); memcpy(&y, MEM + b + 2 * i, 2);
+        if ((fl & 1) && x < 128 && y < 128) { x = (uint16_t)tolower(x); y = (uint16_t)tolower(y); }
+        r = (int)x - (int)y;
+    }
+    if (!r) r = na - nb;
+    RET(c, r < 0 ? 1 : r > 0 ? 3 : 2, 9);
 }
 // GetStringType: C1_* classification used to build the CRT ctype table
 static uint16_t ctype1(int ch) {
@@ -108,8 +124,10 @@ SHIM(GetStringTypeW) {
 SHIM(GetUserDefaultLCID) { RET(c, 0x409, 0); }
 SHIM(GetUserDefaultLangID) { RET(c, 0x409, 0); }
 SHIM(IsValidLocale) { RET(c, 1, 2); }
+SHIM(IsValidLocaleName) { RET(c, 1, 1); }
 SHIM(EnumSystemLocalesA) { RET(c, 1, 2); }
 SHIM(EnumSystemLocalesW) { RET(c, 1, 2); }
+SHIM(EnumSystemLocalesEx) { RET(c, 1, 4); }
 SHIM(GetLocaleInfoA) {
     uint32_t type = ARG(c, 1) & 0xFFFF, buf = ARG(c, 2), n = ARG(c, 3);
     const char *v = type == 0x1004 ? "1252" : type == 0xB ? "437" : type == 0xE ? "." : type == 0xF ? "," : "";
@@ -122,6 +140,25 @@ SHIM(GetLocaleInfoW) {
     const char *v = type == 0x1004 ? "1252" : type == 0xB ? "437" : "";
     uint32_t l = (uint32_t)strlen(v) + 1;
     if (n) { for (uint32_t i = 0; i < l && i < n; i++) { uint16_t ch = (uint8_t)v[i]; memcpy(MEM + buf + 2 * i, &ch, 2); } }
+    RET(c, l, 4);
+}
+SHIM(GetLocaleInfoEx) {
+    uint32_t raw_type = ARG(c, 1), buf = ARG(c, 2), n = ARG(c, 3);
+    uint32_t type = raw_type & 0xFFFFu;
+    if (raw_type & 0x20000000u) { // LOCALE_RETURN_NUMBER
+        uint32_t num = type == 0x1004 ? 1252u : type == 0xB ? 437u : type == 0x20 ? 2u : 0u;
+        if (!n) { RET(c, 2, 4); return; }
+        if (n < 2 || !buf) { SETERR(122); RET(c, 0, 4); return; }
+        P32(buf, num);
+        RET(c, 2, 4);
+        return;
+    }
+    const char *v = type == 0x1004 ? "1252" : type == 0xB ? "437" : type == 0xE ? "." : type == 0xF ? ","
+                  : type == 0x5C ? "en-US" : type == 0x59 ? "en" : type == 0x5A ? "US" : "";
+    uint32_t l = (uint32_t)strlen(v) + 1;
+    if (!n) { RET(c, l, 4); return; }
+    if (n < l) { SETERR(122); RET(c, 0, 4); return; }
+    for (uint32_t i = 0; i < l; i++) { uint16_t ch = (uint8_t)v[i]; memcpy(MEM + buf + 2 * i, &ch, 2); }
     RET(c, l, 4);
 }
 SHIM(GetConsoleCP) { RET(c, 437, 0); }
@@ -199,6 +236,24 @@ SHIM(GetTimeFormatA) {
     if (n < need) { SETERR(122); RET(c, 0, 6); return; }
     memcpy(MEM + buf, s, need); RET(c, need, 6);
 }
+SHIM(GetDateFormatW) {
+    struct tm t; read_or_now_tm(ARG(c, 2), &t);
+    char s[64]; snprintf(s, sizeof s, "%02d/%02d/%04d", t.tm_mon + 1, t.tm_mday, t.tm_year + 1900);
+    uint32_t buf = ARG(c, 4), n = ARG(c, 5), need = (uint32_t)strlen(s) + 1;
+    if (!n) { RET(c, need, 6); return; }
+    if (n < need) { SETERR(122); RET(c, 0, 6); return; }
+    for (uint32_t i = 0; i < need; i++) { uint16_t ch = (uint8_t)s[i]; memcpy(MEM + buf + 2 * i, &ch, 2); }
+    RET(c, need, 6);
+}
+SHIM(GetTimeFormatW) {
+    struct tm t; read_or_now_tm(ARG(c, 2), &t);
+    char s[64]; snprintf(s, sizeof s, "%02d:%02d:%02d", t.tm_hour, t.tm_min, t.tm_sec);
+    uint32_t buf = ARG(c, 4), n = ARG(c, 5), need = (uint32_t)strlen(s) + 1;
+    if (!n) { RET(c, need, 6); return; }
+    if (n < need) { SETERR(122); RET(c, 0, 6); return; }
+    for (uint32_t i = 0; i < need; i++) { uint16_t ch = (uint8_t)s[i]; memcpy(MEM + buf + 2 * i, &ch, 2); }
+    RET(c, need, 6);
+}
 SHIM(GetComputerNameA) {
     uint32_t buf = ARG(c, 0), psz = ARG(c, 1);
 #ifdef FNV_GAME_SKYRIM
@@ -211,7 +266,14 @@ SHIM(GetComputerNameA) {
     memcpy(MEM + buf, nm, len + 1); P32(psz, len); RET(c, 1, 2);
 }
 SHIM(SystemTimeToTzSpecificLocalTime) { memcpy(MEM + ARG(c, 2), MEM + ARG(c, 1), 16); RET(c, 1, 3); }
+SHIM(TzSpecificLocalTimeToSystemTime) { memcpy(MEM + ARG(c, 2), MEM + ARG(c, 1), 16); RET(c, 1, 3); }
+SHIM(SetLocalTime) { RET(c, 0, 1); }
 SHIM(GetTimeZoneInformation) { memset(MEM + ARG(c, 0), 0, 172); RET(c, 0, 1); }
+SHIM(GetSystemTimePreciseAsFileTime) {
+    struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+    uint64_t ft = ((uint64_t)ts.tv_sec + 11644473600ull) * 10000000ull + (uint64_t)ts.tv_nsec / 100ull;
+    memcpy(MEM + ARG(c, 0), &ft, 8); RET(c, 0, 1);
+}
 
 // ---- system ----------------------------------------------------------------------------------
 SHIM(GetSystemInfo) {
@@ -221,6 +283,7 @@ SHIM(GetSystemInfo) {
     P32(p + 24, 586); P32(p + 28, 0x10000); MEM[p + 32] = 6;
     RET(c, 0, 1);
 }
+SHIM(GetNativeSystemInfo) { GetSystemInfo_(c); }
 SHIM(GlobalMemoryStatus) {
     uint32_t p = ARG(c, 0); P32(p, 32); P32(p + 4, 30);
     P32(p + 8, 0x7FFFFFFF); P32(p + 12, 0x7FFFFFFF); P32(p + 16, 0x7FFFFFFF); P32(p + 20, 0x7FFFFFFF);
@@ -233,7 +296,23 @@ SHIM(GlobalMemoryStatusEx) {
     RET(c, 1, 1);
 }
 SHIM(LocalFree) { gfree(ARG(c, 0)); RET(c, 0, 1); }
-SHIM(FormatMessageA) { uint32_t buf = ARG(c, 4); if (!(ARG(c, 0) & 0x100) && buf) { strcpy((char *)MEM + buf, "error"); } RET(c, 5, 7); }
+SHIM(FormatMessageA) {
+    uint32_t flags = ARG(c, 0), buf = ARG(c, 4), nsz = ARG(c, 5);
+    const char *msg = "error";
+    if (!buf) { RET(c, 0, 7); return; }
+    if (flags & 0x100u) {
+        uint32_t p = gmalloc(6);
+        memcpy(MEM + p, msg, 6);
+        P32(buf, p);
+        RET(c, 5, 7);
+        return;
+    }
+    if (nsz == 0) { RET(c, 0, 7); return; }
+    uint32_t cp = nsz - 1 < 5 ? nsz - 1 : 5;
+    memcpy(MEM + buf, msg, cp);
+    MEM[buf + cp] = 0;
+    RET(c, cp, 7);
+}
 SHIM(DebugBreak) { fprintf(stderr, "[host] DebugBreak\n"); RET(c, 0, 0); }
 SHIM(RaiseException) {
     if (ARG(c, 0) == 0x406D1388u) {        // MS_VC_EXCEPTION: "set thread name" for a debugger
@@ -260,12 +339,15 @@ SHIM(TerminateProcess) {
 SHIM_TABLE(text_shims,
     E(MultiByteToWideChar) E(WideCharToMultiByte) E(lstrcatA) E(lstrcpyA) E(lstrcmpA) E(lstrcmpW)
     E(LCMapStringA) E(LCMapStringW) E(LCMapStringEx)
-    E(CompareStringA) E(CompareStringW) E(GetStringTypeA) E(GetStringTypeW) E(GetUserDefaultLCID) E(GetUserDefaultLangID)
-    E(IsValidLocale) E(EnumSystemLocalesA) E(EnumSystemLocalesW) E(GetLocaleInfoA) E(GetLocaleInfoW) E(GetConsoleCP)
+    E(CompareStringA) E(CompareStringW) E(CompareStringEx) E(GetStringTypeA) E(GetStringTypeW)
+    E(GetUserDefaultLCID) E(GetUserDefaultLangID)
+    E(IsValidLocale) E(IsValidLocaleName) E(EnumSystemLocalesA) E(EnumSystemLocalesW) E(EnumSystemLocalesEx)
+    E(GetLocaleInfoA) E(GetLocaleInfoW) E(GetLocaleInfoEx) E(GetConsoleCP)
     E(GetConsoleOutputCP) E(GetConsoleMode) E(WriteConsoleA) E(WriteConsoleW) E(ReadConsoleW)
     E(SetStdHandle) E(SetEnvironmentVariableA) E(SetEnvironmentVariableW) E(ExpandEnvironmentStringsW)
-    E(GetLocalTime) E(GetSystemTime) E(SystemTimeToFileTime) E(FileTimeToSystemTime)
-    E(FileTimeToLocalFileTime) E(LocalFileTimeToFileTime) E(GetDateFormatA) E(GetTimeFormatA) E(GetComputerNameA)
-    E(SystemTimeToTzSpecificLocalTime) E(GetTimeZoneInformation) E(GetSystemInfo)
+    E(GetLocalTime) E(GetSystemTime) E(GetSystemTimePreciseAsFileTime) E(SystemTimeToFileTime) E(FileTimeToSystemTime)
+    E(FileTimeToLocalFileTime) E(LocalFileTimeToFileTime) E(GetDateFormatA) E(GetDateFormatW) E(GetTimeFormatA) E(GetTimeFormatW) E(GetComputerNameA)
+    E(SystemTimeToTzSpecificLocalTime) E(TzSpecificLocalTimeToSystemTime) E(SetLocalTime) E(GetTimeZoneInformation)
+    E(GetSystemInfo) E(GetNativeSystemInfo)
     E(GlobalMemoryStatus) E(GlobalMemoryStatusEx) E(LocalFree) E(FormatMessageA) E(DebugBreak)
     E(RaiseException) E(RtlUnwind) E(TerminateProcess))

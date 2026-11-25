@@ -83,6 +83,7 @@ class FnEmitter:
     def __init__(self, fn):
         self.fn = fn
         self.refs = set()
+        self.dyn_sites = []
         self.addrs = {i["a"] for i in fn["insns"]}
         self.ulocal, self.umap, self.usize = self.layout_uniques(fn)
         self.gw, self.gr = set(), set()          # cached registers written / read
@@ -403,7 +404,18 @@ class FnEmitter:
             return f"X87CHK(0x{hx(a)}u,1);X87_RET;{self.flag_store(self.producers.get(self.fn['entry'], 0))}{self.save()}return;"
         if opc == "CALL":
             t = ins[0][1]
-            return (f"X87CHK(0x{hx(a)}u,2);{{X87_PRE;{self.flag_store(self.consumers.get(t, 0))}{self.save()}{self.call_raw(t)}{self.load_stmt()}X87_POST;}}"
+            if insn.get("len") == 5 and insn["m"].upper().startswith("CALL 0X") and a < 0x40000000:
+                self.dyn_sites.append((a, 0))
+                if t in self.entries:
+                    self.refs.add(t)
+                    call_expr = (f"if(__builtin_expect(_ps==0u,1))g_{hx(t)}(c);"
+                                 f"else rt_call_rel32(c,0x{hx(a)}u,0x{hx(t)}u,g_{hx(t)});")
+                else:
+                    call_expr = (f"if(__builtin_expect(_ps==0u,1))rt_call(c,0x{hx(t)}u);"
+                                 f"else rt_call(c,0x{hx(a)}u+5u+(uint32_t)(int32_t)(uint32_t)LDV(MEM+0x{hx(a + 1)}u,4));")
+            else:
+                call_expr = self.call_raw(t)
+            return (f"X87CHK(0x{hx(a)}u,2);{{X87_PRE;{self.flag_store(self.consumers.get(t, 0))}{self.save()}{call_expr}{self.load_stmt()}X87_POST;}}"
                     f"{self.flag_load(self.reload.get((self.fn['entry'], a), 0))}")
         if opc == "CALLIND":
             return (f"{{uint32_t _t=(uint32_t){self.rd(ins[0])};X87_PRE;{self.save()}rt_call(c,_t);{self.load_stmt()}X87_POST;"
@@ -531,7 +543,7 @@ class FnEmitter:
         return f"P_{hx(a)}_{k}"
 
     # ---- whole function ------------------------------------------------------------------------
-    def emit(self):
+    def emit(self, gid):
         fn = self.fn
         insns = sorted(fn["insns"], key=lambda i: i["a"])
         if not insns:
@@ -571,6 +583,22 @@ class FnEmitter:
                 # INT3 (breakpoint) and INT 0x29 (Windows __fastfail in MSVC 2012+ CRT, e.g.
                 # __report_gsfailure inlined into __security_check_cookie) are non-returning traps.
                 opl, insn = [f"SAVE_REGS;rt_trap(c,TRAP_INT3,0x{hx(a)}u);"], dict(insn, ops=[["RETURN", None, []]])
+            elif (mn == "PUSH" and insn.get("len") in (2, 5) and a < 0x40000000
+                  and len(insn["ops"]) == 3
+                  and insn["ops"][0][0] == "COPY"
+                  and insn["ops"][0][1] is not None and insn["ops"][0][1][2] == 4
+                  and len(insn["ops"][0][2]) == 1
+                  and insn["ops"][0][2][0][0] == "const" and insn["ops"][0][2][0][2] == 4
+                  and insn["ops"][1][0] == "INT_SUB" and insn["ops"][2][0] == "STORE"):
+                val = insn["ops"][0][2][0][1] & 0xffffffff
+                kind = 1 if insn["len"] == 2 else 2
+                helper = "rt_push_imm8" if kind == 1 else "rt_push_imm32"
+                self.dyn_sites.append((a, kind))
+                opl = [
+                    self.wr(insn["ops"][0][1], f"(__builtin_expect(_ps==0u,1)?((V)0x{hx(val)}ULL):{helper}(0x{hx(a)}u))"),
+                    self.op(insn, 1, insn["ops"][1]),
+                    self.op(insn, 2, insn["ops"][2]),
+                ]
             else:
                 opl = [self.op(insn, j, o) for j, o in enumerate(insn["ops"])]
             body.append(f"L_{hx(a)}: /* {insn['m']} */")
@@ -654,14 +682,37 @@ class FnEmitter:
         extra = [x for x in self.extras.get(e0, []) if x in self.addrs and x != e0 and x not in self.primary_entries]
         self.extra_emitted = extra
         if not extra:
-            return name, (f"/* {fn['name']} */\n{macros}void {name}(CPU *c){{uint8_t *R=c->r;{decl}RT_ENTER(0x{hx(e0)}u);LOAD_ENTRY;{entry_flags}\n"
+            guard = f"uint8_t _ps=rt_group_state({gid}u);if(__builtin_expect(_ps==1u,0)){{rt_fallback(c,0x{hx(e0)}u);return;}}"
+            return name, (f"/* {fn['name']} */\n{macros}void {name}(CPU *c){{{guard}uint8_t *R=c->r;{decl}RT_ENTER(0x{hx(e0)}u);LOAD_ENTRY;{entry_flags}\n"
                           + "\n".join(body) + f"\n}}\n{undef}")
         sw = "".join(f"case {k + 1}:goto L_{hx(x)};" for k, x in enumerate(extra))
-        out = (f"/* {fn['name']} (+{len(extra)} entries) */\n{macros}static void b_{hx(e0)}(CPU *c,int ent){{"
+        out = (f"/* {fn['name']} (+{len(extra)} entries) */\n{macros}static void b_{hx(e0)}(CPU *c,int ent,uint8_t _ps){{(void)_ps;"
                f"uint8_t *R=c->r;{decl}LOAD_ENTRY;{entry_flags}switch(ent){{{sw}default:break;}}\n" + "\n".join(body) + f"\n}}\n{undef}")
-        out += f"void {name}(CPU *c){{RT_ENTER(0x{hx(e0)}u);b_{hx(e0)}(c,0);}}\n"
-        out += "".join(f"void g_{hx(x)}(CPU *c){{RT_ENTER(0x{hx(x)}u);b_{hx(e0)}(c,{k + 1});}}\n" for k, x in enumerate(extra))
+        out += f"void {name}(CPU *c){{uint8_t _ps=rt_group_state({gid}u);if(__builtin_expect(_ps==1u,0)){{rt_fallback(c,0x{hx(e0)}u);return;}}RT_ENTER(0x{hx(e0)}u);b_{hx(e0)}(c,0,_ps);}}\n"
+        out += "".join(
+            f"void g_{hx(x)}(CPU *c){{uint8_t _ps=rt_group_state({gid}u);if(__builtin_expect(_ps==1u,0)){{rt_fallback(c,0x{hx(x)}u);return;}}RT_ENTER(0x{hx(x)}u);b_{hx(e0)}(c,{k + 1},_ps);}}\n"
+            for k, x in enumerate(extra)
+        )
         return name, out
+
+
+def compute_ranges(insns, gid):
+    """Coalesce contiguous/overlapping instruction spans [lo, hi) for a function group."""
+    spans = sorted((i["a"], i["a"] + i["len"]) for i in insns if i.get("len", 0) > 0)
+    out = []
+    cur_lo = cur_hi = None
+    for lo, hi in spans:
+        if cur_lo is None:
+            cur_lo, cur_hi = lo, hi
+        elif lo <= cur_hi:
+            if hi > cur_hi:
+                cur_hi = hi
+        else:
+            out.append((cur_lo, cur_hi, gid))
+            cur_lo, cur_hi = lo, hi
+    if cur_lo is not None:
+        out.append((cur_lo, cur_hi, gid))
+    return out
 
 
 def write_if_changed(path, text):
@@ -779,6 +830,9 @@ def main():
         FnEmitter.entries.update(dedup)
 
     ok, skipped, why = [], [], Counter()
+    group_count = 0
+    ranges = []
+    dyn_sites_map = {}
     tu, tu_idx, chunk = [], 0, []
     chunk_key = None
     refs = set()
@@ -795,22 +849,27 @@ def main():
 
     for line in open(args.inp):
         fn = sanitize_fn(json.loads(line))
+        gid = group_count
         try:
             em = FnEmitter(fn)
-            name, code = em.emit()
+            name, code = em.emit(gid)
         except Unsupported as e:
             reason = str(e)
             why[reason] += 1
             skipped.append({"entry": fn["entry"], "reason": reason})
             continue
+        group_count += 1
         # translation units are keyed by address range, not by count: a newly discovered function
         # then changes one TU instead of shifting every later boundary (incremental rebuilds)
         key = fn["entry"] >> 15
         if chunk and key != chunk_key:
             flush()
         chunk_key = key
-        ok.append((fn["entry"], name))
-        ok.extend((x, f"g_{hx(x)}") for x in em.extra_emitted)
+        ok.append((fn["entry"], name, gid))
+        ok.extend((x, f"g_{hx(x)}", gid) for x in em.extra_emitted)
+        ranges.extend(compute_ranges(fn["insns"], gid))
+        for sa, sk in em.dyn_sites:
+            dyn_sites_map[sa] = sk
         refs |= em.refs
         chunk.append(code)
     flush()
@@ -819,7 +878,7 @@ def main():
     # Unicorn fallback instead of trapping: the host interprets the whole function with a real
     # x86 decoder, which also recovers functions auto-analysis split at a wrong instruction
     # boundary (e.g. the CRT ISA probe). Test hosts keep their trapping rt_fallback.
-    emitted = {e for e, _ in ok}
+    emitted = {e for e, _, _ in ok}
     stubs = ['#include "rt.h"\n']
     if True:
         # anything declared callable but not emitted (skipped, or an extra entry that was not an
@@ -828,11 +887,36 @@ def main():
             stubs.append(f"void g_{hx(e)}(CPU *c){{rt_fallback(c,0x{hx(e)}u);}}\n")
     write_if_changed(os.path.join(args.outdir, "stubs.c"), "".join(stubs))
     ok.sort()
+    ranges.sort()
+    max_span = max((hi - lo for lo, hi, _ in ranges), default=0)
+    if ok:
+        fn_addr_init = ",".join(f"0x{hx(e)}u" for e, _, _ in ok)
+        fn_ptr_init = ",".join(n for _, n, _ in ok)
+        fn_group_init = ",".join(f"{g}u" for _, _, g in ok)
+    else:
+        fn_addr_init, fn_ptr_init, fn_group_init = "0", "0", "0"
+    if ranges:
+        ranges_init = ",".join(f"{{0x{hx(lo)}u,0x{hx(hi)}u,{gid}u}}" for lo, hi, gid in ranges)
+    else:
+        ranges_init = "{0,0,0}"
+    dyn_sites_sorted = sorted(dyn_sites_map.items())
+    if dyn_sites_sorted:
+        dyn_sites_init = ",".join(f"0x{hx((sk << 30) | sa)}u" for sa, sk in dyn_sites_sorted)
+    else:
+        dyn_sites_init = "0"
     write_if_changed(os.path.join(args.outdir, "table.c"),
-                     '#include "rt.h"\n' + "".join(f"void {name}(CPU *);\n" for _, name in ok)
-                     + "const uint32_t rt_fn_addr[] = {" + ",".join(f"0x{hx(e)}u" for e, _ in ok) + "};\n"
-                     + "const GuestFn rt_fn_ptr[] = {" + ",".join(n for _, n in ok) + "};\n"
-                     + f"const int rt_fn_count = {len(ok)};\n")
+                     '#include "rt.h"\n' + "".join(f"void {name}(CPU *);\n" for _, name, _ in ok)
+                     + f"const uint32_t rt_fn_addr[] = {{{fn_addr_init}}};\n"
+                     + f"const GuestFn rt_fn_ptr[] = {{{fn_ptr_init}}};\n"
+                     + f"const int rt_fn_count = {len(ok)};\n"
+                     + f"const uint32_t rt_fn_group[] = {{{fn_group_init}}};\n"
+                     + f"const int rt_fn_group_count = {group_count};\n"
+                     + f"uint8_t rt_fn_patched[{max(group_count, 1)}] = {{0}};\n"
+                     + f"const RtFnRange rt_fn_ranges[] = {{{ranges_init}}};\n"
+                     + f"const int rt_fn_range_count = {len(ranges)};\n"
+                     + f"const uint32_t rt_fn_range_max_span = 0x{hx(max_span)}u;\n"
+                     + f"const uint32_t rt_dyn_sites[] = {{{dyn_sites_init}}};\n"
+                     + f"const int rt_dyn_site_count = {len(dyn_sites_sorted)};\n")
     with open(os.path.join(args.outdir, "emit_report.json"), "w") as f:
         json.dump({"emitted": len(ok), "skipped": len(skipped), "reasons": why.most_common(),
                    "skipped_fns": skipped}, f, indent=1)
