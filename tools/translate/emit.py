@@ -516,6 +516,11 @@ class FnEmitter:
             return "rt_lock();"
         if name == "UNLOCK":
             return "rt_unlock();"
+        if "_avx512" in name:
+            # rt_cpuid advertises no AVX/AVX-512, so ISA-dispatched AVX-512 branches in
+            # MSVC 2019+ CRT helpers (e.g. _ftoui3) are unreachable at runtime. Emit a
+            # runtime trap rather than rejecting the whole function to Unicorn fallback.
+            return f"SAVE_REGS;rt_trap(c,TRAP_UNSUPPORTED,0x{hx(insn['a'])}u);"
         e = simple.get(name)
         if e is None or out is None:
             raise Unsupported(f"callother {name}")
@@ -562,7 +567,9 @@ class FnEmitter:
                 opl = [self.wr(s0, f"{fn_}({self.rd(s0)},{self.rd(s1)})") +
                        "R[4242]=0;ST(R+4258,LD(R+4258,2)&~(U)0x400,2);"]
                 insn = dict(insn, ops=[["COPY", None, []]])
-            elif mn == "INT3":
+            elif mn == "INT3" or insn["m"].upper() == "INT 0X29":
+                # INT3 (breakpoint) and INT 0x29 (Windows __fastfail in MSVC 2012+ CRT, e.g.
+                # __report_gsfailure inlined into __security_check_cookie) are non-returning traps.
                 opl, insn = [f"SAVE_REGS;rt_trap(c,TRAP_INT3,0x{hx(a)}u);"], dict(insn, ops=[["RETURN", None, []]])
             else:
                 opl = [self.op(insn, j, o) for j, o in enumerate(insn["ops"])]
