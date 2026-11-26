@@ -2,6 +2,7 @@
 #import <CoreGraphics/CoreGraphics.h>
 #import <GameController/GameController.h>
 #import <CommonCrypto/CommonDigest.h>
+#import "FNVGameView.h"
 #import "FNVOptions.h"
 #import "FNVSurface.h"
 #import "FNVPad.h"
@@ -191,6 +192,49 @@ static void detectPhysicalDisplayPixels(NSScreen *screen,
     if (outBackingH) *outBackingH = backH;
 }
 
+#ifndef FNV_PROBE
+// The camera housing (notch) covers a strip at the top of the built-in display. Falling back to
+// macOS's compatibility mode ("Scale to fit below built-in camera") letterboxes the whole app,
+// which also shrinks the width and leaves bars on three sides. Rendering at the safe-area aspect
+// keeps the native width: the game fills everything below the housing and only that strip is black.
+// Fallout's HUD sits at the bottom, so it keeps the whole panel; Skyrim's compass is top-center and
+// would end up behind the housing, so it reserves the strip by default. FNV_NOTCH_SAFE=0/1 overrides.
+static BOOL notchSafeWanted(void) {
+    const char *env = getenv("FNV_NOTCH_SAFE");
+    if (env && env[0]) return env[0] != '0';
+#ifdef FNV_GAME_SKYRIM
+    return YES;
+#else
+    return NO;
+#endif
+}
+
+// An explicit output resolution (FNV_OUTPUT_WIDTH/HEIGHT) is a deliberate choice; leave it alone.
+static BOOL outputSizeOverridden(void) {
+    const char *w = getenv("SKYRIM_OUTPUT_WIDTH");
+    if (!w || !w[0]) w = getenv("FNV_OUTPUT_WIDTH");
+    const char *h = getenv("SKYRIM_OUTPUT_HEIGHT");
+    if (!h || !h[0]) h = getenv("FNV_OUTPUT_HEIGHT");
+    return (w && w[0]) || (h && h[0]);
+}
+
+// Height of the camera housing in points: the screen's safe-area inset, or FNV_NOTCH_SIM_PX
+// (pixels) on Macs without a notch, so the layout can be exercised and screenshotted everywhere.
+static CGFloat notchTopInsetPoints(NSScreen *screen) {
+    if (!screen) return 0;
+    const char *sim = getenv("FNV_NOTCH_SIM_PX");
+    if (sim && sim[0]) {
+        double px = strtod(sim, NULL);
+        CGFloat scale = screen.backingScaleFactor > 0 ? screen.backingScaleFactor : 2.0;
+        return px > 0 ? (CGFloat)(px / scale) : 0;
+    }
+    CGFloat top = 0;
+    if (@available(macOS 12.0, *)) top = screen.safeAreaInsets.top;
+    if (!(top >= 4)) return 0;
+    return ceil(MIN(top, (CGFloat)80));
+}
+#endif
+
 // macOS virtual key code -> DirectInput scancode (DIK_*)
 static const uint8_t mac2dik[128] = {
     [0x00] = 0x1E, [0x01] = 0x1F, [0x02] = 0x20, [0x03] = 0x21, [0x04] = 0x23, [0x05] = 0x22, [0x06] = 0x2C, [0x07] = 0x2D,
@@ -274,6 +318,7 @@ static NSString *exeHash(NSURL *url) {
 }
 @property (nonatomic, strong) NSWindow *window;
 @property (nonatomic, strong) FNVMetalView *metalView;
+@property (nonatomic, strong) FNVGameView *gameContainer;
 @property (nonatomic, strong) NSTextField *statusLabel;
 @property (nonatomic, strong) NSTimer *padTimer;
 @property (nonatomic) BOOL cursorCaptured;
@@ -482,10 +527,14 @@ static NSString *exeHash(NSURL *url) {
     self.window.backgroundColor = NSColor.blackColor;
     mainWindow = self.window;
 
-    self.metalView = [[FNVMetalView alloc] initWithFrame:winRect];
+    self.gameContainer = [[FNVGameView alloc] initWithFrame:winRect];
+    self.gameContainer.contentPixelSize = CGSizeMake(outW, outH);
+    self.metalView = [[FNVMetalView alloc] initWithFrame:self.gameContainer.bounds];
     self.metalView.wantsLayer = YES;
-    self.metalView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    self.window.contentView = self.metalView;
+    self.gameContainer.gameView = self.metalView;
+    [self.gameContainer addSubview:self.metalView];
+    [self.gameContainer layoutGameView];
+    self.window.contentView = self.gameContainer;
     screenLayer = (CAMetalLayer *)self.metalView.layer;
     screenLayer.contentsScale = scale;
 
@@ -641,7 +690,24 @@ static NSString *exeHash(NSURL *url) {
     NSScreen *screen = NSScreen.mainScreen ?: NSScreen.screens.firstObject;
     CGFloat scale = self.screenScale ?: 2.0;
 
-    fnv_display_configure_scaled(self.nativeW, self.nativeH, settings.renderScale);
+    // Reserve the camera housing strip by rendering a shorter frame at full width (see
+    // notchSafeWanted). This applies to windowed launches too, so toggling fullscreen later keeps
+    // the same image aspect and still leaves the strip black; only the view placement differs.
+    unsigned panelW = self.nativeW, panelH = self.nativeH;
+    CGFloat notchInset = 0;
+    if (notchSafeWanted() && !outputSizeOverridden()) {
+        CGFloat points = notchTopInsetPoints(screen);
+        unsigned insetPx = points > 0 ? (unsigned)llround(points * scale) : 0;
+        if (insetPx > 0 && panelH > insetPx + 480) {
+            panelH -= insetPx;
+            notchInset = points;
+        }
+    }
+    if (notchInset > 0) {
+        fprintf(stderr, "[display] camera housing: %.0fpt reserved at the top, output %ux%u\n",
+                notchInset, panelW, panelH);
+    }
+    fnv_display_configure_scaled(panelW, panelH, settings.renderScale);
     fnv_graphics_configure(settings.upscaler, settings.antiAliasing);
     unsigned outW = fnv_output_width() ?: fnv_display_width();
     unsigned outH = fnv_output_height() ?: fnv_display_height();
@@ -753,6 +819,18 @@ static NSString *exeHash(NSURL *url) {
     [thread start];
 }
 #endif
+
+// Fullscreen keeps the image aspect-exact and bottom-anchored, so whatever height AppKit does not
+// give the content (the camera-housing strip, when it is not already excluded) stays black.
+- (void)windowDidEnterFullScreen:(NSNotification *)notification {
+    (void)notification;
+    self.gameContainer.fullscreenMode = YES;
+}
+
+- (void)windowDidExitFullScreen:(NSNotification *)notification {
+    (void)notification;
+    self.gameContainer.fullscreenMode = NO;
+}
 
 - (void)windowWillClose:(NSNotification *)notification {
 #ifndef FNV_PROBE

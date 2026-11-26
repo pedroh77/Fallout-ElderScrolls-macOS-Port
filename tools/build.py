@@ -377,7 +377,7 @@ def main():
     app_name = args.app_name or (profile['probe_name'] if probe else profile['app_name'])
     exe_name = profile['probe_name'] if probe else profile['exe_name']
 
-    sources = [M / 'FNVApp.m', M / 'FNVPad.c', M / 'FNVDisplay.c', H / 'd3d9_metal.m']
+    sources = [M / 'FNVApp.m', M / 'FNVGameView.m', M / 'FNVPad.c', M / 'FNVDisplay.c', H / 'd3d9_metal.m']
     if probe:
         sources += [M / 'FNVProbe.c', M / 'ProbeRuntime.c']
         sources += [H / (s + '.c') for s in ['d3d9', 'dinput', 'com', 'gheap', 'input', 'sm2msl']]
