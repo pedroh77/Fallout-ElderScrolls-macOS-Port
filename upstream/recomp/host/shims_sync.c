@@ -23,6 +23,15 @@ void *handle_get(uint32_t h, int type) {
     uint32_t i = h / 4;
     return i < MAXH && htab[i].type == type ? htab[i].obj : NULL;
 }
+void *handle_get_ref(uint32_t h, int type, void (*ref)(void *obj)) {
+    uint32_t i = h / 4;
+    if (i >= MAXH) return NULL;
+    pthread_mutex_lock(&hlock);
+    void *obj = htab[i].type == type ? htab[i].obj : NULL;
+    if (obj) ref(obj);
+    pthread_mutex_unlock(&hlock);
+    return obj;
+}
 int handle_type(uint32_t h) { uint32_t i = h / 4; return i < MAXH ? htab[i].type : 0; }
 void file_close_obj(void *obj) __attribute__((weak));
 void file_close_obj(void *obj) { (void)obj; }

@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include "shims.h"
 uint8_t *MEM;
 _Thread_local uint32_t host_last_error;
@@ -11,7 +12,8 @@ static int types[32];
 uint32_t handle_new(int type,void *object){for(int i=1;i<32;i++)if(!objects[i]){objects[i]=object;types[i]=type;return i;}abort();}
 void *handle_get(uint32_t h,int type){return h<32&&types[h]==type?objects[h]:NULL;}
 int handle_type(uint32_t h){return h<32?types[h]:0;}
-void handle_close(uint32_t h){if(h<32&&objects[h]){if(types[h]==H_FILE){close(*(int *)objects[h]);free(objects[h]);}objects[h]=NULL;types[h]=0;}}
+void *handle_get_ref(uint32_t h,int type,void (*ref)(void *)){void *o=handle_get(h,type);if(o)ref(o);return o;}
+void handle_close(uint32_t h){if(h<32&&objects[h]){if(types[h]==H_FILE)file_close_obj(objects[h]);objects[h]=NULL;types[h]=0;}}
 static uint32_t call(const char *name,const uint32_t *args,int count){
     CPU c={0};SETREG(&c,R_ESP,0x1000);P32(0x1000,0xabc);
     for(int i=0;i<count;i++)P32(0x1004+4*i,args[i]);
@@ -27,6 +29,13 @@ int main(int argc,char **argv){
     uint32_t a[]={str("data\\fallout - misc.bsa"),0x80000000,0,0,3,0,0};
     uint32_t h=call("CreateFileA",a,7);check("CreateFileA mixed directory and basename",h!=0xffffffffu);
     if(h!=0xffffffffu){uint32_t r[]={h,0x30000,6,0x31000,0};check("ReadFile original content",call("ReadFile",r,5)&&G32(0x31000)==6&&!memcmp(MEM+0x30000,"marker",6));handle_close(h);}
+    {   // CloseHandle must release the host descriptor (it used to leak until EMFILE)
+        int next=dup(0);close(next);                                   // the fd number open() hands out next
+        uint32_t h2=call("CreateFileA",a,7);
+        int was_open=h2!=0xffffffffu&&fcntl(next,F_GETFD)!=-1;
+        if(h2!=0xffffffffu)handle_close(h2);
+        check("CloseHandle closes the host descriptor",was_open&&fcntl(next,F_GETFD)==-1);
+    }
     uint32_t at[]={str("DATA\\FALLOUT - MISC.BSA")};check("GetFileAttributesA case aliases",call("GetFileAttributesA",at,1)!=0xffffffffu);
     uint32_t ini[]={str("archive"),str("sarchivelist"),str("missing"),0x32000,256,str("c:\\games\\falloutnv\\userdocuments\\my games\\falloutnv\\Fallout.ini")};
     call("GetPrivateProfileStringA",ini,6);check("INI drive path, component and key case",!strcmp((char *)MEM+0x32000,"example.bsa"));

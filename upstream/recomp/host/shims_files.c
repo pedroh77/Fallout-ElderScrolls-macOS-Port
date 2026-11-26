@@ -7,6 +7,7 @@
 #include <fnmatch.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
@@ -108,14 +109,17 @@ uint32_t wlen(uint32_t w) { uint32_t i = 0; uint16_t ch; for (;; i++) { memcpy(&
 static int trace_files(void) { static int t = -1; if (t < 0) t = getenv("FNV_TRACE_FILES") != NULL; return t; }
 
 // ---- files -----------------------------------------------------------------------------------
-typedef struct { int fd; } FileObj;
-
-void file_close_obj(void *obj) {
-    FileObj *f = obj;
-    if (!f) return;
-    if (f->fd >= 0) close(f->fd);
-    free(f);
+// A file object is referenced by its handle-table slot and by every shim call using it.
+// CloseHandle drops the slot's reference; the descriptor is closed when the last one goes,
+// so a read racing a close on another thread finishes on its own file instead of on
+// whatever file reuses the fd number.
+typedef struct { int fd; int refs; } FileObj;
+static int files_open;                             // descriptors held by file objects (for the failure log)
+static void file_ref(void *obj) { __atomic_fetch_add(&((FileObj *)obj)->refs, 1, __ATOMIC_RELAXED); }
+static void file_put(FileObj *f) {
+    if (f && __atomic_sub_fetch(&f->refs, 1, __ATOMIC_ACQ_REL) == 0) { close(f->fd); free(f); __atomic_fetch_sub(&files_open, 1, __ATOMIC_RELAXED); }
 }
+void file_close_obj(void *obj) { file_put(obj); }
 
 static uint32_t open_file(const char *winpath, uint32_t access, uint32_t disp) {
     char path[1024]; host_path(winpath, path, sizeof path);
@@ -133,23 +137,31 @@ static uint32_t open_file(const char *winpath, uint32_t access, uint32_t disp) {
     int fd = open(path, fl, 0644);
     int error=fd<0?errno:0;
     if (trace_files()) fprintf(stderr, "[file] open %s (%s) -> %d errno=%d\n", winpath, path, fd,error);
+    if (fd < 0 && error != ENOENT) {                 // "not there" is routine; anything else is worth seeing
+        static unsigned other, exhausted;              // separate caps: path noise must not hide fd exhaustion
+        int emfile = error == EMFILE || error == ENFILE;
+        if (__atomic_fetch_add(emfile ? &exhausted : &other, 1, __ATOMIC_RELAXED) < 16)
+            fprintf(stderr, "[file] open failed: %s (%s) errno=%d (%s), %d files open\n", winpath, path, error, strerror(error),
+                    __atomic_load_n(&files_open, __ATOMIC_RELAXED));
+    }
     if (fd < 0) {
         SETERR(error == EEXIST ? 80 : (error == EMFILE || error == ENFILE) ? 4 : (error == EACCES || error == EPERM) ? 5 : 2);
         return 0xFFFFFFFFu;
     }
     FileObj *f = malloc(sizeof *f);
     if (!f) { close(fd); SETERR(8); return 0xFFFFFFFFu; }
-    f->fd = fd;
+    f->fd = fd; f->refs = 1; __atomic_fetch_add(&files_open, 1, __ATOMIC_RELAXED);
     uint32_t h = handle_new(H_FILE, f);
-    if (!h) { close(fd); free(f); SETERR(4); return 0xFFFFFFFFu; }
+    if (!h) { close(fd); free(f); __atomic_fetch_sub(&files_open, 1, __ATOMIC_RELAXED); SETERR(4); return 0xFFFFFFFFu; }
     return h;
 }
 SHIM(CreateFileA) { RET(c, open_file(GSTR(ARG(c, 0)), ARG(c, 1), ARG(c, 4)), 7); }
 SHIM(CreateFileW) { char p[1024]; w2a(ARG(c, 0), p, sizeof p); RET(c, open_file(p, ARG(c, 1), ARG(c, 4)), 7); }
-static FileObj *fobj(uint32_t h) { return handle_get(h, H_FILE); }
+static FileObj *fobj(uint32_t h) { return handle_get_ref(h, H_FILE, file_ref); }   // release with file_put
 SHIM(ReadFile) {
     FileObj *f = fobj(ARG(c, 0)); uint32_t buf = ARG(c, 1), n = ARG(c, 2), got = ARG(c, 3);
     ssize_t r = f ? read(f->fd, MEM + buf, n) : -1;
+    file_put(f);
     if (got) P32(got, r > 0 ? (uint32_t)r : 0);
     RET(c, r >= 0, 5);
 }
@@ -157,16 +169,17 @@ SHIM(WriteFile) {
     uint32_t h = ARG(c, 0), buf = ARG(c, 1), n = ARG(c, 2), put = ARG(c, 3);
     ssize_t r;
     if (h >= 0x10 && h <= 0x13) r = write(2, MEM + buf, n);        // std handles -> stderr
-    else { FileObj *f = fobj(h); r = f ? write(f->fd, MEM + buf, n) : -1; }
+    else { FileObj *f = fobj(h); r = f ? write(f->fd, MEM + buf, n) : -1; file_put(f); }
     if (put) P32(put, r > 0 ? (uint32_t)r : 0);
     RET(c, r >= 0, 5);
 }
 static uint64_t unix_to_ft(time_t t) { return ((uint64_t)t + 11644473600ull) * 10000000ull; }
 SHIM(ReadFileEx) {
     FileObj *f = fobj(ARG(c, 0)); uint32_t buf = ARG(c, 1), n = ARG(c, 2), ov = ARG(c, 3), cb = ARG(c, 4);
-    if (!f || !ov) { SETERR(6); RET(c, 0, 5); return; }
+    if (!f || !ov) { file_put(f); SETERR(6); RET(c, 0, 5); return; }
     off_t off = (off_t)(((uint64_t)G32(ov + 12) << 32) | G32(ov + 8));
     ssize_t r = pread(f->fd, MEM + buf, n, off);
+    file_put(f);
     if (r < 0) { SETERR(38); RET(c, 0, 5); return; }
     P32(ov, 0); P32(ov + 4, (uint32_t)r);
     host_queue_io_apc(cb, 0, (uint32_t)r, ov);
@@ -174,9 +187,10 @@ SHIM(ReadFileEx) {
 }
 SHIM(WriteFileEx) {
     FileObj *f = fobj(ARG(c, 0)); uint32_t buf = ARG(c, 1), n = ARG(c, 2), ov = ARG(c, 3), cb = ARG(c, 4);
-    if (!f || !ov) { SETERR(6); RET(c, 0, 5); return; }
+    if (!f || !ov) { file_put(f); SETERR(6); RET(c, 0, 5); return; }
     off_t off = (off_t)(((uint64_t)G32(ov + 12) << 32) | G32(ov + 8));
     ssize_t r = pwrite(f->fd, MEM + buf, n, off);
+    file_put(f);
     if (r < 0) { SETERR(29); RET(c, 0, 5); return; }
     P32(ov, 0); P32(ov + 4, (uint32_t)r);
     host_queue_io_apc(cb, 0, (uint32_t)r, ov);
@@ -185,17 +199,19 @@ SHIM(WriteFileEx) {
 SHIM(PeekNamedPipe) { SETERR(6); RET(c, 0, 6); }
 SHIM(GetFileTime) {
     FileObj *f = fobj(ARG(c, 0)); struct stat st;
-    if (!f || fstat(f->fd, &st)) { SETERR(6); RET(c, 0, 4); return; }
+    int bad = !f || fstat(f->fd, &st); file_put(f);
+    if (bad) { SETERR(6); RET(c, 0, 4); return; }
     uint64_t ct = unix_to_ft(st.st_mtime), at = unix_to_ft(st.st_atime), wt = unix_to_ft(st.st_mtime);
     if (ARG(c, 1)) memcpy(MEM + ARG(c, 1), &ct, 8);
     if (ARG(c, 2)) memcpy(MEM + ARG(c, 2), &at, 8);
     if (ARG(c, 3)) memcpy(MEM + ARG(c, 3), &wt, 8);
     RET(c, 1, 4);
 }
-SHIM(SetFileTime) { RET(c, fobj(ARG(c, 0)) != NULL, 4); }
+SHIM(SetFileTime) { FileObj *f = fobj(ARG(c, 0)); int ok = f != NULL; file_put(f); RET(c, ok, 4); }
 SHIM(GetFileInformationByHandle) {
     FileObj *f = fobj(ARG(c, 0)); uint32_t out = ARG(c, 1); struct stat st;
-    if (!f || !out || fstat(f->fd, &st)) { SETERR(6); RET(c, 0, 2); return; }
+    int bad = !f || !out || fstat(f->fd, &st); file_put(f);
+    if (bad) { SETERR(6); RET(c, 0, 2); return; }
     memset(MEM + out, 0, 52);
     P32(out, S_ISDIR(st.st_mode) ? 0x10 : 0x80);
     uint64_t ft = unix_to_ft(st.st_mtime);
@@ -208,13 +224,15 @@ SHIM(GetFileInformationByHandle) {
 }
 SHIM(GetFileSize) {
     FileObj *f = fobj(ARG(c, 0)); struct stat st;
-    if (!f || fstat(f->fd, &st)) { RET(c, 0xFFFFFFFFu, 2); return; }
+    int bad = !f || fstat(f->fd, &st); file_put(f);
+    if (bad) { RET(c, 0xFFFFFFFFu, 2); return; }
     if (ARG(c, 1)) P32(ARG(c, 1), (uint32_t)((uint64_t)st.st_size >> 32));
     RET(c, (uint32_t)st.st_size, 2);
 }
 SHIM(GetFileSizeEx) {
     FileObj *f = fobj(ARG(c, 0)); struct stat st;
-    if (!f || fstat(f->fd, &st)) { RET(c, 0, 2); return; }
+    int bad = !f || fstat(f->fd, &st); file_put(f);
+    if (bad) { RET(c, 0, 2); return; }
     uint64_t sz = (uint64_t)st.st_size; memcpy(MEM + ARG(c, 1), &sz, 8);
     RET(c, 1, 2);
 }
@@ -222,6 +240,7 @@ SHIM(SetFilePointer) {
     FileObj *f = fobj(ARG(c, 0)); int64_t d = (int32_t)ARG(c, 1);
     if (ARG(c, 2)) d = (int64_t)(((uint64_t)G32(ARG(c, 2)) << 32) | (uint32_t)ARG(c, 1));
     off_t r = f ? lseek(f->fd, d, (int)ARG(c, 3)) : -1;
+    file_put(f);
     if (ARG(c, 2) && r >= 0) P32(ARG(c, 2), (uint32_t)((uint64_t)r >> 32));
     RET(c, r < 0 ? 0xFFFFFFFFu : (uint32_t)r, 4);
 }
@@ -229,10 +248,11 @@ SHIM(SetFilePointerEx) {
     FileObj *f = fobj(ARG(c, 0));
     int64_t d = (int64_t)(((uint64_t)ARG(c, 2) << 32) | ARG(c, 1));
     off_t r = f ? lseek(f->fd, d, (int)ARG(c, 4)) : -1;
+    file_put(f);
     if (ARG(c, 3) && r >= 0) { uint64_t v = (uint64_t)r; memcpy(MEM + ARG(c, 3), &v, 8); }
     RET(c, r >= 0, 5);
 }
-SHIM(SetEndOfFile) { FileObj *f = fobj(ARG(c, 0)); RET(c, f && ftruncate(f->fd, lseek(f->fd, 0, SEEK_CUR)) == 0, 1); }
+SHIM(SetEndOfFile) { FileObj *f = fobj(ARG(c, 0)); int ok = f && ftruncate(f->fd, lseek(f->fd, 0, SEEK_CUR)) == 0; file_put(f); RET(c, ok, 1); }
 SHIM(FlushFileBuffers) { RET(c, 1, 1); }
 SHIM(DeleteFileA) { char p[1024]; host_path(GSTR(ARG(c, 0)), p, sizeof p); RET(c, unlink(p) == 0, 1); }
 SHIM(MoveFileA) { char a[1024], b[1024]; host_path(GSTR(ARG(c, 0)), a, sizeof a); host_path(GSTR(ARG(c, 1)), b, sizeof b); RET(c, rename(a, b) == 0, 2); }

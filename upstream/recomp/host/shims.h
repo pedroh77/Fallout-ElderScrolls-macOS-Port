@@ -21,5 +21,8 @@ uint32_t wlen(uint32_t w);
 enum { H_FILE = 1, H_FIND, H_EVENT, H_SEMA, H_MUTEX, H_THREAD };
 uint32_t handle_new(int type, void *obj);
 void *handle_get(uint32_t h, int type);
+// handle_get, then ref(obj) while the table lock is held: the object cannot be closed in between
+void *handle_get_ref(uint32_t h, int type, void (*ref)(void *obj));
+void file_close_obj(void *obj);    // handle_close of an H_FILE: drops the table's reference
 int handle_type(uint32_t h);
 void handle_close(uint32_t h);
