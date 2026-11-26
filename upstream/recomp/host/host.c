@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/resource.h>
 #include <unistd.h>
 #include "FNVGuestMemory.h"
 #include <pthread.h>
@@ -196,6 +197,19 @@ static void install_fault_handler(void) {
     sigaction(SIGSEGV, &sa, NULL);
 }
 
+// A Finder/`open` launch inherits a soft descriptor limit of a few hundred (356 observed), while
+// the game streams thousands of loose files and BSAs on several threads. Raise it before any guest
+// code runs; still capped below macOS's per-process OPEN_MAX (10240).
+static void raise_fd_limit(void) {
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl)) return;
+    rlim_t want = rl.rlim_max < 4096 ? rl.rlim_max : 4096, was = rl.rlim_cur;
+    if (was >= want) return;
+    rl.rlim_cur = want;
+    if (setrlimit(RLIMIT_NOFILE, &rl)) { perror("setrlimit(RLIMIT_NOFILE)"); return; }
+    fprintf(stderr, "[host] descriptor limit raised from %llu to %llu\n", (unsigned long long)was, (unsigned long long)want);
+}
+
 int fnv_run_game(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: %s game.exe [args]\n", argv[0]); return 2; }
     install_fault_handler();
@@ -205,6 +219,7 @@ int fnv_run_game(int argc, char **argv) {
     // the game's main thread runs the frame: keep it on performance cores ahead of the game's workers
     // (a CLI process otherwise starts at default QoS and can land on efficiency cores)
     if (!getenv("FNV_NO_QOS")) pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    raise_fd_limit();
     host_init_args(argc - 1, argv + 1);
     uint32_t entry = load_pe(argv[1]);
     bind_imports(host_image_base);
