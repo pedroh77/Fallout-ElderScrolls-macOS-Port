@@ -177,3 +177,47 @@ Medidos com `FNV_HEADLESS=1 FNV_STDERR=1 FNV_USER_DIR=/tmp/fnv-prof/user` (crit�
    - Em execuções headless sem TTY, passe `FNV_STDERR=1`, caso contrário `FNVApp.m` redireciona `stderr` para `~/Library/Logs/FalloutNV/fnv.log`.
    - `FNV_QUIT_AFTER` só conta após frames Metal (`Present()`). Se travar sem renderizar frames, combine com timeout no shell/Python.
    - Sempre preserve `~/Library/Application Support/FalloutNV/UserDocuments` usando `FNV_USER_DIR=/tmp/...` em testes automatizados.
+
+---
+
+## 6. Roteiro de Medição: Onde o NVSE Base Gasta Tempo por Frame (Passo 1 antes de investir em AOT)
+
+**Objetivo:** decidir com dados se vale traduzir estaticamente (AOT) o `nvse_1_4.dll` para ARM64. Hipótese a validar: o custo base do NVSE (60 fps vanilla -> 45–55 fps com NVSE sem plugins no MBA M1 8 GB, Ultra + SMAA) vem dos hooks emulados no Unicorn por frame. Alternativas: custo de troca de contexto nativo<->Unicorn (`cpu_to_uc`/`uc_to_cpu`) ou dos ~42 grupos desotimizados.
+
+**Contexto do resultado esperado (estimativa, NÃO medida):** ~65–75% de chance de chegar a 58–60 fps com o NVSE base recompilado. Só a medição abaixo confirma.
+
+### 6.1 Configuração
+- Somente `nvse_1_4.dll`, sem nenhum plugin em `~/Library/Application Support/FalloutNV/NVSE/Plugins/` (mova os DLLs para uma pasta de backup e restaure depois).
+- Mesmas configurações gráficas em todas as rodadas (Ultra, resolução cheia, SMAA) para comparação justa.
+- Isole saves: `FNV_USER_DIR=/tmp/fnv-prof/user` (copie um save real para lá se precisar de gameplay). Nunca aponte para `UserDocuments`.
+- Compare duas rodadas: **A) vanilla** (`FNV_NVSE=0`) e **B) NVSE sem plugins** (`FNV_NVSE=1`).
+
+### 6.2 Procedimento (cerca de 30 minutos)
+1. Inicie o app com `FNV_STDERR=1 FNV_NVSE=<0|1> FNV_USER_DIR=/tmp/fnv-prof/user` e carregue um save em área aberta de gameplay (ex.: Goodsprings).
+2. Aguarde ~30s de gameplay estável e anote o FPS médio e o pacing exibido pelo Metal HUD / log `[metal] frame N: X fps`.
+3. Em outro terminal, colete amostras:
+   ```bash
+   PID=$(pgrep -x FalloutNewVegas)
+   sample $PID 10 -f /tmp/fnv-prof/sample_nvse_<A|B>.txt
+   ```
+4. Repita em cada rodada (A e B) e compare os dois relatórios.
+
+### 6.3 O que procurar no `sample`
+- **Tempo total em `rt_fallback` / `uc_emu_start` / `cpu_exec_x86_64` / `helper_*` (QEMU TCG)** na thread do jogo: quanto da fatia de 16,6 ms vai para emulação.
+- **Tempo em `cpu_to_uc` / `uc_to_cpu`** (conversão de registradores, FPU e XMM a cada entrada/saída do Unicorn): se for grande, o gargalo é a troca de contexto.
+- **`on_block` / `on_edge` / `tuc_*`:** overhead de interceptação.
+- **Quais funções do jogo (`g_<addr>`)** entram em fallback com mais frequência. Use `FNV_FALLBACK_LOG=/tmp/fb.log` para listar os endereços interpretados, e `FNV_TRACE=1` se precisar do detalhe.
+
+### 6.4 Interpretação da decisão
+
+| Resultado | Interpretação | Ação recomendada |
+|---|---|---|
+| A maior parte do tempo está em código x86 emulado (`cpu_exec_x86_64`) dentro dos hooks do `nvse_1_4.dll` | O custo vem da emulação dos hooks por frame | AOT do `nvse_1_4.dll` deve recuperar quase tudo do vanilla |
+| A maior parte do tempo está em `cpu_to_uc`/`uc_to_cpu`/`uc_emu_start` com blocos curtos | O custo vem da troca de contexto frequente | Reduzir pontos de entrada (mais funções via `try_fast_leaf`/sites dinâmicos) ou AOT parcial dos hooks mais frequentes |
+| Custo diluído em muitas funções desotimizadas do jogo | Pouco ganho só traduzindo o `nvse_1_4.dll` | Estudar manter mais funções nativas via sites dinâmicos (`rt_call_rel32`/`CALL5`) antes de AOT |
+
+### 6.5 Se a medição indicar AOT do `nvse_1_4.dll`
+- Reaproveitar `tools/translate/` (Ghidra -> P-code -> `emit.py` -> Clang ARM64) sobre `nvse_1_4.dll` como se fosse um segundo módulo.
+- **Desafios esperados (DLL compilada com MSVC moderno):** SSE/AVX, SEH/exceções C++, TLS, relocações, imports dinâmicos (`GetProcAddress`), e interação com os hooks `rt_call_rel32`/`rt_group_state`. Espere correções iterativas no `emit.py`, como ocorreu com Fallout 3 e Skyrim.
+- **Versão fixa:** xNVSE 6.4.9, SHA-256 da DLL `e82c5d348bac255a8ff4cf477df2e48149304b18f02b42b2a835c3cba71f3dfb`.
+- **Plugins de terceiros (opcional, segunda fase):** só depois do NVSE base, um a um (NVTF -> JohnnyGuitar -> ShowOff -> Stewie -> JIP por último). Fixar versões e hashes. `EngineOptimizations.dll` não deve ser traduzido nem recomendado no ARM64.
