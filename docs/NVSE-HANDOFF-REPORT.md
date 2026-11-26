@@ -149,22 +149,29 @@ Medidos com `FNV_HEADLESS=1 FNV_STDERR=1 FNV_USER_DIR=/tmp/fnv-prof/user` (crit�
 
 > **Observação sobre `EngineOptimizations.dll`:** comparando `no_eo` (`31.9s`) vs `all6` (`40.6s–42.1s`), `EngineOptimizations.dll` adiciona ~`9s` ao boot porque faz o `nvse_stewie_tweaks.dll` substituir ~462 funções folha vanilla por código x86 em `.text`. Em ARM64, isso não traz ganho porque essas funções já eram ARM64 `-O2`.
 
-### 4.3 Teste Interativo Real do Usuário (2026-11-25)
-- **Vanilla (`Enable xNVSE` OFF):** cursor responde rápido, clique pula a introdução direto a partir da 2ª tela (`Bethesda`) para o Ranger e Menu Principal; jogo carrega normalmente (teste breve de ~10s, sem falhas visíveis).
-- **Com xNVSE + 6 plugins ativos:**
-  - Chega ao Menu Principal logo após a tela do Ranger, com controle de cursor funcionando.
-  - **Falha pendente:** ao iniciar **New Game** ou **Load Save**, durante a tela de loading **o jogo congela** (as dicas de texto travam no meio do fade-in/fade-out), enquanto a música continua tocando. O usuário confirmou que aguardou e o comportamento bloqueia o gameplay com os 6 mods por enquanto.
+### 4.3 Teste Interativo Real do Usuário (2026-11-25, MacBook Air M1 8 GB, Ultra + Resolução Cheia + SMAA)
+- **Vanilla (`Enable xNVSE` OFF):**
+  - `~60 fps` relativamente constante, frame pacing limpo/silencioso na maior parte do tempo (quedas ocasionais para `~58 fps`).
+  - Cursor responde rápido, clique pula a introdução direto da 2ª tela (`Bethesda`) para o Ranger e Menu Principal; jogo carrega normalmente (teste breve de ~10s, sem falhas visíveis).
+- **xNVSE sem plugins, e cada plugin isoladamente (`NVTF`, `johnnyguitar`, `ShowOffNVSE`, `nvse_stewie_tweaks`):**
+  - **Todos funcionam in-game isoladamente**, exceto `jip_nvse.dll`!
+  - **Desempenho no MBA M1 8 GB (Ultra + resolução cheia + SMAA):** tanto o xNVSE puro quanto cada plugin isolado colocam o FPS na faixa de **`45–55 fps`** variável, com **frame pacing irregular** (indicando que o próprio overhead base do `nvse_1_4.dll` rodando hooks por frame no Unicorn consome a maior parte dessa margem no M1).
+- **`EngineOptimizations.dll` + `nvse_stewie_tweaks.dll` (e também "todos os 5 exceto JIP"):**
+  - Funciona e passa pelo loading até entrar no jogo (inclusive no teste `EngineOptimizations + Stewie` isolado e no teste com os 5 plugins exceto JIP).
+  - Porém, o FPS cai para **`~12–16 fps` estáveis** (dois testes a `~12 fps`, incluindo o com 5 plugins sem JIP; um teste a `15–16 fps`), com frame pacing mais uniforme (gargalo constante de CPU causado pelas ~462 funções quentes sobrescritas na `.text` pelos `[Inlines]` do Stewie).
+- **`jip_nvse.dll` (sozinho ou combinado):**
+  - **Culpado confirmado do freeze no loading:** é o único dos 6 plugins que congela o jogo ao iniciar `New Game` ou `Load Save` (frases da tela de loading travam no meio do fade enquanto a música continua tocando).
 
 ---
 
 ## 5. Próximos Passos Recomendados para o Próximo Agente
 
-1. **Reproduzir e diagnosticar o freeze de New Game / Load Save:**
-   - Rodar com `FNV_STDERR=1` + `FNV_TRACE_SYNC=1` (e opcionalmente `FNV_FALLBACK_LOG=/tmp/fb.log`) enquanto dispara `New Game` ou carrega um save via `FNV_INPUT_SCRIPT` (ou manualmente na UI) usando `FNV_USER_DIR` isolado (cópia do save real em `/tmp`).
+1. **Reproduzir e diagnosticar o freeze de New Game / Load Save específico do `jip_nvse.dll`:**
+   - **Isolamento confirmado:** o problema ocorre especificamente com `jip_nvse.dll`; os outros 5 plugins já carregam e entram em jogo.
+   - Rodar apenas `jip_nvse.dll` ativo com `FNV_STDERR=1` + `FNV_TRACE_SYNC=1` (e opcionalmente `FNV_FALLBACK_LOG=/tmp/fb.log`) enquanto dispara `New Game` ou carrega um save via `FNV_INPUT_SCRIPT` (ou manualmente na UI) usando `FNV_USER_DIR` isolado (cópia do save real em `/tmp`).
    - Quando congelar na tela de loading, capturar `sample <PID> 3` + `spindump` ou anexar `lldb -p <PID>` (`thread backtrace all`) para identificar:
-     - Se há threads presas em Unicorn (`uc_emu_start` / algum loop em DLL ou função hookada de carregamento de célula/save/BSA/NVSE);
-     - Se há deadlock entre shims de sincronização (`shims_sync.c`: `SRWLock`, `WaitOnAddress`, `CriticalSection`, `ConditionVariable`) ou `pe_loader`/file shims (`CreateFileMapping`/`MapViewOfFile` usados pelo `jip_nvse`/`nvse_stewie_tweaks`/cosave `.nvse`);
-     - Se algum dos 6 plugins isoladamente já passa pelo loading ou qual módulo introduz o travamento (testar em modo binário: apenas NVSE sem plugins -> cada plugin isolado -> combinações).
+     - Se há threads presas em Unicorn (`uc_emu_start` / algum loop em `jip_nvse.dll` ou função hookada de carregamento de célula/save/BSA/`TESObjectREFR::LoadForm`);
+     - Se há deadlock entre shims de sincronização (`shims_sync.c`: `SRWLock`, `WaitOnAddress`, `CriticalSection`, `ConditionVariable`) ou `pe_loader`/file shims (`CreateFileMapping`/`MapViewOfFile` usados pelo JIP / co-save `.nvse`).
 2. **Armadilhas conhecidas deste ambiente:**
    - **Nunca** execute `pkill -f "FalloutNewVegas"` em comando zsh que contenha a string `"FalloutNewVegas"` (mata o próprio subshell). Use `pkill -x FalloutNewVegas`.
    - Em execuções headless sem TTY, passe `FNV_STDERR=1`, caso contrário `FNVApp.m` redireciona `stderr` para `~/Library/Logs/FalloutNV/fnv.log`.
