@@ -510,6 +510,10 @@ def main():
             LSMinimumSystemVersion=deploy_target,
             LSApplicationCategoryType='public.app-category.games',
             NSHighResolutionCapable=True,
+            # Without this key macOS may run the app in camera-housing compatibility mode, which
+            # letterboxes native fullscreen below the notch on MacBooks that have one (issue #6).
+            # False = never compatibility mode: fullscreen uses the whole panel.
+            NSPrefersDisplaySafeAreaCompatibilityMode=False,
             GCSupportedGameControllers=[{'ProfileName': 'ExtendedGamepad'}],
         )
         if not probe:
