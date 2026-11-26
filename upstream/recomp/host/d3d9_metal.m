@@ -777,11 +777,7 @@ static int setup_draw(D3DState *s) {
     ec_vbuf(ring[ring_idx], last_vs_off, 20);
     ec_vbytes(s->vsi, sizeof s->vsi, 21);
     ec_vbytes(s->vsb, sizeof s->vsb, 22);
-#ifdef FNV_GAME_SKYRIM
     float vsys[4] = {s->viewport[2] ? 1.0f / (float)s->viewport[2] : 0, s->viewport[3] ? -1.0f / (float)s->viewport[3] : 0, 0, 0};
-#else
-    float vsys[4] = {s->viewport[2] ? -1.0f / (float)s->viewport[2] : 0, s->viewport[3] ? 1.0f / (float)s->viewport[3] : 0, 0, 0};
-#endif
     if(screen)for(unsigned i=0;i<4;i++)vsys[i]=(float)s->viewport[i];
     ec_vbytes(vsys, sizeof vsys, 23);
     ec_fbuf(ring[ring_idx], last_ps_off, 0);
