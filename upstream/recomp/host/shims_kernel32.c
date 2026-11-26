@@ -52,6 +52,27 @@ void host_init_args(int argc, char **argv) {
 
 // ---- thread / TEB ----------------------------------------------------------------------------
 #define TLS_SLOTS 64
+// Dynamic TLS (TlsAlloc) lives in the TEB's 64 inline slots at +0xE10. Slots must be reusable: the
+// engine frees and reallocates 8 slots on every save load, so without reuse they run out on the 5th
+// load, TlsAlloc returns TLS_OUT_OF_INDEXES and the task queue's hazard-pointer context breaks
+// (TRAP at 0xc3dd68 or an endless loop under g_6662a0). Like Windows, a newly allocated slot reads
+// as 0 on every thread, so it is cleared in every TEB. TEB pages are never freed, which keeps the
+// TEB list valid for threads that have already exited.
+static pthread_mutex_t tls_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint8_t tls_used[TLS_SLOTS];
+static uint32_t *tls_tebs;
+static size_t tls_nteb, tls_cap;
+static void tls_register_teb(uint32_t teb) {
+    pthread_mutex_lock(&tls_mu);
+    if (tls_nteb == tls_cap) {
+        size_t cap = tls_cap ? tls_cap * 2 : 64;
+        uint32_t *n = realloc(tls_tebs, cap * sizeof *n);
+        if (!n) { pthread_mutex_unlock(&tls_mu); fprintf(stderr, "[tls] out of memory registering TEB\n"); abort(); }
+        tls_tebs = n; tls_cap = cap;
+    }
+    tls_tebs[tls_nteb++] = teb;
+    pthread_mutex_unlock(&tls_mu);
+}
 void host_thread_init(CPU *c, uint32_t stack_size) {
     uint32_t stack = gpages(stack_size);
     uint32_t teb = gpages(0x2000);
@@ -73,6 +94,7 @@ void host_thread_init(CPU *c, uint32_t stack_size) {
     SETREG(c, R_ESP, stack + stack_size - 64);
     { uint16_t fcw = 0x037Fu; uint32_t mxcsr = 0x1F80u; memcpy(c->r + 4256, &fcw, 2); memcpy(c->r + 4244, &mxcsr, 4); }
     if (!teb_main) teb_main = teb;
+    tls_register_teb(teb);
 }
 
 // ---- shims -----------------------------------------------------------------------------------
@@ -292,15 +314,71 @@ SHIM(VirtualFree_) {
 SHIM(VirtualQuery_) { RET(c, 0, 3); }
 
 // TLS / FLS
-static uint32_t tls_next;
-SHIM(TlsAlloc_) { RET(c, tls_next < TLS_SLOTS ? tls_next++ : 0xFFFFFFFFu, 0); }
-SHIM(TlsFree_) { RET(c, 1, 1); }
-SHIM(TlsGetValue_) { uint32_t i = ARG(c, 0); last_error = 0; RET(c, G32(REG(c, 272) + 0xE10 + 4 * i), 1); }
-SHIM(TlsSetValue_) { uint32_t i = ARG(c, 0); P32(REG(c, 272) + 0xE10 + 4 * i, ARG(c, 1)); RET(c, 1, 2); }
-SHIM(FlsAlloc_) { (void)ARG(c, 0); RET(c, tls_next < TLS_SLOTS ? tls_next++ : 0xFFFFFFFFu, 1); }
-SHIM(FlsFree_) { RET(c, 1, 1); }
-SHIM(FlsGetValue_) { uint32_t i = ARG(c, 0); last_error = 0; RET(c, G32(REG(c, 272) + 0xE10 + 4 * i), 1); }
-SHIM(FlsSetValue_) { uint32_t i = ARG(c, 0); P32(REG(c, 272) + 0xE10 + 4 * i, ARG(c, 1)); RET(c, 1, 2); }
+// FlsAlloc draws from the same 64 slots and the same free list as TlsAlloc: Windows hands both APIs
+// indices out of one pool, and this emulation keeps FLS values in the same inline TEB array, so a
+// shared free list is what stops the two from handing the same index to different callers.
+static uint32_t tls_take_slot(void) {
+    uint32_t r = 0xFFFFFFFFu;
+    pthread_mutex_lock(&tls_mu);
+    for (uint32_t i = 0; i < TLS_SLOTS; i++) {
+        if (tls_used[i]) continue;
+        tls_used[i] = 1; r = i;
+        for (size_t t = 0; t < tls_nteb; t++) P32(tls_tebs[t] + 0xE10 + 4 * i, 0);
+        break;
+    }
+    pthread_mutex_unlock(&tls_mu);
+    return r;
+}
+static uint32_t tls_release_slot(uint32_t i) {
+    uint32_t ok = 0;
+    if (i < TLS_SLOTS) {
+        pthread_mutex_lock(&tls_mu);
+        if (tls_used[i]) { tls_used[i] = 0; ok = 1; }
+        pthread_mutex_unlock(&tls_mu);
+    }
+    return ok;
+}
+SHIM(TlsAlloc_) {
+    uint32_t r = tls_take_slot();
+    if (r == 0xFFFFFFFFu) { last_error = 8; fprintf(stderr, "[tls] TlsAlloc: all %d slots in use\n", TLS_SLOTS); } // ERROR_NOT_ENOUGH_MEMORY
+    RET(c, r, 0);
+}
+SHIM(TlsFree_) {
+    uint32_t ok = tls_release_slot(ARG(c, 0));
+    if (!ok) last_error = 87;                                // ERROR_INVALID_PARAMETER
+    RET(c, ok, 1);
+}
+SHIM(TlsGetValue_) {
+    uint32_t i = ARG(c, 0);
+    if (i >= TLS_SLOTS) { last_error = 87; RET(c, 0, 1); return; }
+    last_error = 0; RET(c, G32(REG(c, 272) + 0xE10 + 4 * i), 1);
+}
+SHIM(TlsSetValue_) {
+    uint32_t i = ARG(c, 0);
+    if (i >= TLS_SLOTS) { last_error = 87; RET(c, 0, 2); return; }
+    P32(REG(c, 272) + 0xE10 + 4 * i, ARG(c, 1)); RET(c, 1, 2);
+}
+SHIM(FlsAlloc_) {
+    (void)ARG(c, 0);
+    uint32_t r = tls_take_slot();
+    if (r == 0xFFFFFFFFu) { last_error = 8; fprintf(stderr, "[tls] FlsAlloc: all %d slots in use\n", TLS_SLOTS); }
+    RET(c, r, 1);
+}
+SHIM(FlsFree_) {
+    uint32_t ok = tls_release_slot(ARG(c, 0));
+    if (!ok) last_error = 87;
+    RET(c, ok, 1);
+}
+SHIM(FlsGetValue_) {
+    uint32_t i = ARG(c, 0);
+    if (i >= TLS_SLOTS) { last_error = 87; RET(c, 0, 1); return; }
+    last_error = 0; RET(c, G32(REG(c, 272) + 0xE10 + 4 * i), 1);
+}
+SHIM(FlsSetValue_) {
+    uint32_t i = ARG(c, 0);
+    if (i >= TLS_SLOTS) { last_error = 87; RET(c, 0, 2); return; }
+    P32(REG(c, 272) + 0xE10 + 4 * i, ARG(c, 1)); RET(c, 1, 2);
+}
 
 // environment / code pages / startup info
 SHIM(GetEnvironmentStringsW_) { uint32_t p = gmalloc(4); RET(c, p, 0); }
