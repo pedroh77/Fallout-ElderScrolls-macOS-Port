@@ -250,6 +250,10 @@ WITH_STEAM=no
 GAME_ID=""
 GAME_ARG=""
 BREW_INSTALLED=()
+# Packages installed by any run are remembered outside CACHE_ROOT: a run that fails after the
+# installs must not lose the "how to uninstall" hint when the script is run again (issue #5).
+BREW_STATE_DIR="$HOME/Library/Caches/fnv-macos-installer"
+BREW_STATE_FILE="$BREW_STATE_DIR/brew-installed"
 BREW_SELF_INSTALLED=no
 BREW_ADDED_TO_PATH=no
 while [ $# -gt 0 ]; do
@@ -348,6 +352,46 @@ require_brew() {
 	BREW_SELF_INSTALLED=yes
 	ok "Installed Homebrew into /opt/homebrew"
 }
+
+# Ghidra's launcher needs a JDK on PATH or in JAVA_HOME; without one it asks the user for a path,
+# which cannot work headless ("Unable to prompt user for JDK path, no TTY detected"). Homebrew
+# installs the JDK ghidra depends on keg-only, so it is neither linked nor registered with
+# /usr/libexec/java_home; resolve it from the formula's dependencies instead of hard-coding a version.
+ghidra_jdk_home() {
+	local dep prefix
+	for dep in $(brew deps ghidra 2>/dev/null | grep -E '^openjdk(@[0-9]+)?$'); do
+		prefix="$(brew --prefix "$dep" 2>/dev/null)" || continue
+		if [ -x "$prefix/libexec/openjdk.jdk/Contents/Home/bin/java" ]; then
+			printf '%s\n' "$prefix/libexec/openjdk.jdk/Contents/Home"
+			return 0
+		fi
+		if [ -x "$prefix/bin/java" ]; then
+			printf '%s\n' "$prefix"
+			return 0
+		fi
+	done
+	return 1
+}
+
+remember_brew_packages() {
+	[ $# -gt 0 ] || return 0
+	mkdir -p "$BREW_STATE_DIR" 2>/dev/null || return 0
+	{
+		cat "$BREW_STATE_FILE" 2>/dev/null || true
+		printf '%s\n' "$@"
+	} | awk 'NF && !seen[$0]++' >"$BREW_STATE_FILE.tmp" 2>/dev/null &&
+		mv "$BREW_STATE_FILE.tmp" "$BREW_STATE_FILE" 2>/dev/null || true
+}
+
+load_brew_packages() {
+	local pkg
+	[ -f "$BREW_STATE_FILE" ] || return 0
+	while IFS= read -r pkg; do
+		[ -n "$pkg" ] || continue
+		BREW_INSTALLED+=("$pkg")
+	done <"$BREW_STATE_FILE"
+}
+load_brew_packages
 
 banner
 
@@ -678,6 +722,7 @@ download_game_via_steamcmd() {
 			brew_install_quiet "Installing steamcmd via Homebrew" --cask steamcmd \
 				|| die "Failed to install steamcmd via Homebrew."
 			BREW_INSTALLED+=(steamcmd)
+			remember_brew_packages steamcmd
 		fi
 		command -v steamcmd >/dev/null 2>&1 || die "steamcmd not found after installation."
 	else
@@ -1309,6 +1354,7 @@ if [ "$MATCH_KIND" = gog_installer ]; then
 		brew_install_quiet "Installing innoextract via Homebrew" innoextract \
 			|| die "Failed to install innoextract via Homebrew."
 		BREW_INSTALLED+=(innoextract)
+		remember_brew_packages innoextract
 	fi
 	GOG_OUT="$TMP/gog-extract"
 	GOG_LOG="$TMP/innoextract.log"
@@ -1386,6 +1432,7 @@ unpack_steam_drm() {
 		brew_install_quiet "Installing Mono runtime via Homebrew" mono \
 			|| die "Failed to install Mono via Homebrew."
 		BREW_INSTALLED+=(mono)
+		remember_brew_packages mono
 	fi
 	local mono_bin
 	mono_bin="$(command -v mono || true)"
@@ -1547,12 +1594,29 @@ if [ ${#MISSING_BREW[@]} -gt 0 ]; then
 	brew_install_quiet "Installing via Homebrew: ${MISSING_BREW[*]}" "${MISSING_BREW[@]}" \
 		|| die "Failed to install required Homebrew packages: ${MISSING_BREW[*]}"
 	BREW_INSTALLED+=("${MISSING_BREW[@]}")
+	remember_brew_packages "${MISSING_BREW[@]}"
 fi
 
 HEADLESS="$(brew --prefix ghidra)/libexec/support/analyzeHeadless"
 [ -x "$HEADLESS" ] || die "Ghidra analyzeHeadless not found at $HEADLESS"
 UNICORN_PREFIX="$(brew --prefix unicorn)"
 [ -f "$UNICORN_PREFIX/lib/libunicorn.a" ] || die "libunicorn.a not found at $UNICORN_PREFIX"
+
+# Ghidra needs a JDK it can find by itself; hand it one explicitly (see ghidra_jdk_home).
+GHIDRA_JAVA_HOME="$(ghidra_jdk_home || true)"
+if [ -z "$GHIDRA_JAVA_HOME" ] && [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+	GHIDRA_JAVA_HOME="$JAVA_HOME"
+fi
+if [ -z "$GHIDRA_JAVA_HOME" ] && [ -x /usr/libexec/java_home ]; then
+	GHIDRA_JAVA_HOME="$(/usr/libexec/java_home 2>/dev/null || true)"
+fi
+[ -n "$GHIDRA_JAVA_HOME" ] && [ -x "$GHIDRA_JAVA_HOME/bin/java" ] || die \
+	"Ghidra could not find a Java Development Kit (JDK)." \
+	"Homebrew installs one as a ghidra dependency; try: brew reinstall ghidra" \
+	"Or install a JDK (for example: brew install openjdk), then re-run this script."
+export JAVA_HOME="$GHIDRA_JAVA_HOME"
+export PATH="$JAVA_HOME/bin:$PATH"
+ok "Ghidra JDK: $JAVA_HOME"
 ok "Toolchain ready (Ghidra + Unicorn + CMake + FFmpeg)"
 
 # ---------------------------------------------------------------------------
@@ -1991,11 +2055,31 @@ print_post_install_notes() {
 	if [ -n "$GOG_INSTALLER_PATH" ]; then
 		printf '  Original GOG installer files in %s were kept (safe to delete if you do not need a backup).\n' "$(dirname "$GOG_INSTALLER_PATH")"
 	fi
-	if [ ${#BREW_INSTALLED[@]} -gt 0 ]; then
-		printf '\n  %sHomebrew packages installed during this run:%s %s\n' "$BOLD" "$RESET" "${BREW_INSTALLED[*]}"
+	# Packages are remembered across runs, so filter to the ones still installed (a previous run may
+	# have installed them and then failed before printing this hint; see issue #5).
+	local still=() cask_still=() pkg
+	for pkg in "${BREW_INSTALLED[@]}"; do
+		if "$brew_cmd" list --cask --versions "$pkg" >/dev/null 2>&1; then
+			cask_still+=("$pkg")
+		elif "$brew_cmd" list --versions "$pkg" >/dev/null 2>&1; then
+			still+=("$pkg")
+		fi
+	done
+	if [ ${#still[@]} -gt 0 ] || [ ${#cask_still[@]} -gt 0 ]; then
+		printf '\n  %sHomebrew packages installed by this installer:%s' "$BOLD" "$RESET"
+		for pkg in "${still[@]}" "${cask_still[@]}"; do printf ' %s' "$pkg"; done
+		printf '\n'
 		printf '  None of them are required to play. To uninstall them later:\n'
-		printf '    %s uninstall %s && %s cleanup\n' "$brew_cmd" "${BREW_INSTALLED[*]}" "$brew_cmd"
+		if [ ${#still[@]} -gt 0 ]; then
+			printf '    %s uninstall %s\n' "$brew_cmd" "${still[*]}"
+		fi
+		if [ ${#cask_still[@]} -gt 0 ]; then
+			printf '    %s uninstall --cask %s\n' "$brew_cmd" "${cask_still[*]}"
+		fi
+		printf '    %s cleanup\n' "$brew_cmd"
+		printf '  ("%s autoremove" also drops dependencies they pulled in, such as the JDK.)\n' "$brew_cmd"
 	fi
+	rm -f "$BREW_STATE_FILE" 2>/dev/null || true
 	if [ "$BREW_SELF_INSTALLED" = yes ]; then
 		printf '\n  %sHomebrew itself was installed into /opt/homebrew during this run.%s\n' "$BOLD" "$RESET"
 		printf '  It is not required to play. To uninstall Homebrew completely later, run its official script:\n'

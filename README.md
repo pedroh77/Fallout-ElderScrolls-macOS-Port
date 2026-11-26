@@ -258,7 +258,14 @@ Holding `Option` on launch (or leaving "Skip launcher" unchecked) opens the nati
 
 **None of the Homebrew packages or build tools are needed to play once the `.app` is built.** `libunicorn.a` is statically linked into the app binary, `.bik` cutscenes are already converted to `.mp4`, Ghidra only runs during translation, and Skyrim's FFmpeg xWMA decoders (`libavcodec`, `libswresample`, `libavutil` and dependencies) are bundled directly inside `Skyrim.app/Contents/Frameworks/`.
 
-`quick-install.sh` cleans up leftover source files, `gogdl`, and `~/Library/Caches/fnv-macos` automatically upon success (unless `--keep-cache` is passed), and intentionally does **not** uninstall global software from your Mac. At the end of a run, it prints the exact list of any Homebrew packages it installed together with a ready-to-copy `brew uninstall` command (and if `quick-install.sh` installed Homebrew itself during that run, it also prints the official Homebrew uninstall script command).
+`quick-install.sh` cleans up leftover source files, `gogdl`, and `~/Library/Caches/fnv-macos` automatically upon success (unless `--keep-cache` is passed), and intentionally does **not** uninstall global software from your Mac. At the end of a run, it prints the exact list of any Homebrew packages it installed together with a ready-to-copy `brew uninstall` command (and if `quick-install.sh` installed Homebrew itself during that run, it also prints the official Homebrew uninstall script command). Packages installed by an earlier run that failed are remembered, so a re-run still shows how to remove them.
+
+The installer also resolves the JDK that Ghidra needs by itself, reading it from Ghidra's Homebrew dependencies (Homebrew installs it keg-only, where Ghidra's launcher cannot find it on its own). If you see Ghidra report `Unable to prompt user for JDK path, no TTY detected`, reinstall it (`brew reinstall ghidra`) or point the installer at a JDK explicitly:
+
+```sh
+export JAVA_HOME="$(brew --prefix openjdk@25)/libexec/openjdk.jdk/Contents/Home"
+./quick-install.sh
+```
 
 To remove build-only tools later:
 
