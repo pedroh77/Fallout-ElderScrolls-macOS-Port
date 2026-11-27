@@ -2058,7 +2058,7 @@ print_post_install_notes() {
 	# Packages are remembered across runs, so filter to the ones still installed (a previous run may
 	# have installed them and then failed before printing this hint; see issue #5).
 	local still=() cask_still=() pkg
-	for pkg in "${BREW_INSTALLED[@]}"; do
+	for pkg in "${BREW_INSTALLED[@]+"${BREW_INSTALLED[@]}"}"; do
 		if "$brew_cmd" list --cask --versions "$pkg" >/dev/null 2>&1; then
 			cask_still+=("$pkg")
 		elif "$brew_cmd" list --versions "$pkg" >/dev/null 2>&1; then
@@ -2067,7 +2067,7 @@ print_post_install_notes() {
 	done
 	if [ ${#still[@]} -gt 0 ] || [ ${#cask_still[@]} -gt 0 ]; then
 		printf '\n  %sHomebrew packages installed by this installer:%s' "$BOLD" "$RESET"
-		for pkg in "${still[@]}" "${cask_still[@]}"; do printf ' %s' "$pkg"; done
+		for pkg in "${still[@]+"${still[@]}"}" "${cask_still[@]+"${cask_still[@]}"}"; do printf ' %s' "$pkg"; done
 		printf '\n'
 		printf '  None of them are required to play. To uninstall them later:\n'
 		if [ ${#still[@]} -gt 0 ]; then
