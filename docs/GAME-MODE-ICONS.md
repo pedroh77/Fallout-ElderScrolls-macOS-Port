@@ -6,7 +6,7 @@ avoid it. It exists so all ports in this repository (and future ports such as
 Oblivion) do not repeat the Fallout 3 / New Vegas icon confusion.
 
 - **Observed on:** macOS 27.2.1 (build 26B131), Apple Silicon, 2026-11-22.
-- **Confirmed in:** Fallout 3 (`dev.f3mac.fallout3`) and Skyrim (`dev.skyrimmac.<target>`); the
+- **Confirmed in:** Fallout 3 (`dev.fallout3mac.<target>`, migrated from `dev.f3mac.fallout3`) and Skyrim (`dev.skyrimmac.<target>`); the
   user verified the Game Mode icon after the fix.
 - **Credit:** the per-`CFBundleIdentifier` cache behavior was surfaced by
   **FineWine**; this note records the reproduction and the fix in this port.
@@ -68,14 +68,17 @@ What did fix it:
 
 The user then confirmed the Game Mode icon was correct. Later rebuilds went
 back to `CFBundleVersion = 1` and the icon stayed correct, because the
-identifier is now unique. That is the important nuance: **the unique id is the
-durable fix; the version bump was only needed to invalidate the old shared-id
-cache once.**
+identifier is now unique. When `AppIcon-Fallout3.png` was later replaced
+again, bumping `CFBundleVersion` alone on `dev.f3mac.fallout3` did not
+invalidate the Game Mode cache while stale v1 copies remained registered on
+disk, so Fallout 3 moved to `dev.fallout3mac.<target>` (matching `dev.fnvmac.<target>`
+and `dev.skyrimmac.<target>`). That is the important nuance: **changing the
+identifier is the durable guaranteed refresh.**
 
 Current Fallout 3 bundle for reference:
 
 ```text
-CFBundleIdentifier   dev.f3mac.fallout3
+CFBundleIdentifier   dev.fallout3mac.game
 CFBundleVersion      1
 CFBundleIconFile     AppIcon
 LSApplicationCategoryType  public.app-category.games
@@ -87,7 +90,7 @@ Every port/target must have its own identity:
 
 | Game | Identifier | Icon asset |
 | --- | --- | --- |
-| Fallout 3 | `dev.f3mac.fallout3` | `macos/Assets/AppIcon-Fallout3.png` |
+| Fallout 3 | `dev.fallout3mac.<target>` | `macos/Assets/AppIcon-Fallout3.png` |
 | Fallout: New Vegas | `dev.fnvmac.<target>` | `macos/Assets/AppIcon.png` |
 | Skyrim (32-bit LE) | `dev.skyrimmac.<target>` | `macos/Assets/AppIcon-Skyrim.png` |
 | Oblivion (future) | `dev.oblivionmac.<target>` (or `dev.f3mac.oblivion`) | `AppIcon-Oblivion.png` |

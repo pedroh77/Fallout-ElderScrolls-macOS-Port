@@ -282,6 +282,7 @@ GAME_PROFILES = {
         'bundle_prefix': 'dev.fnvmac.',
         'fixed_bundle_id': None,
         'icon': 'AppIcon.png',
+        'default_version': '1',
         'steam_appid': '22380',
         'define': None,
         'options_src': 'OptionsFallout.m',
@@ -290,11 +291,12 @@ GAME_PROFILES = {
         'app_name': 'Fallout 3',
         'probe_name': 'FNVProbe',
         'exe_name': 'Fallout3',
-        'bundle_prefix': None,
-        # Dedicated Fallout 3 identifier so macOS never serves a stale FNV Game Mode icon;
-        # see docs/GAME-MODE-ICONS.md for full details.
-        'fixed_bundle_id': 'dev.f3mac.fallout3',
+        'bundle_prefix': 'dev.fallout3mac.',
+        # Unique Fallout 3 prefix (matching dev.fnvmac./dev.skyrimmac.); supersedes dev.f3mac.fallout3
+        # to guarantee a fresh Game Mode icon cache when AppIcon-Fallout3.png changes (docs/GAME-MODE-ICONS.md).
+        'fixed_bundle_id': None,
         'icon': 'AppIcon-Fallout3.png',
+        'default_version': '1',
         'steam_appid': '22370',
         'define': '-DFNV_GAME_FALLOUT3',
         'options_src': 'OptionsFallout.m',
@@ -306,6 +308,7 @@ GAME_PROFILES = {
         'bundle_prefix': 'dev.skyrimmac.',
         'fixed_bundle_id': None,
         'icon': 'AppIcon-Skyrim.png',
+        'default_version': '1',
         'steam_appid': '72850',
         'define': '-DFNV_GAME_SKYRIM',
         'options_src': 'OptionsSkyrim.m',
@@ -331,12 +334,13 @@ def main():
     p.add_argument('--steam-appid', default=None, help='Steam AppID written to steam_appid.txt when bundling libsteam_api.dylib')
     p.add_argument('--no-call-trace', action='store_true', help='omit per-function diagnostic ring writes')
     p.add_argument('--deployment-target', default=None, help='macOS deployment target (default: host major.0, min 14.0)')
-    p.add_argument('--version', default=os.environ.get('GITHUB_RUN_NUMBER', '1'), help='positive numeric app build version')
+    p.add_argument('--version', default=None, help='positive numeric app build version')
     args = p.parse_args()
 
-    if not args.version.isdecimal() or not 0 < int(args.version) <= 2147483647:
-        p.error('--version must be a positive 32-bit integer')
     profile = GAME_PROFILES[args.game]
+    version = args.version or os.environ.get('GITHUB_RUN_NUMBER') or profile.get('default_version', '1')
+    if not version.isdecimal() or not 0 < int(version) <= 2147483647:
+        p.error('--version must be a positive 32-bit integer')
     steam_appid = str(args.steam_appid or profile['steam_appid']).strip()
     probes = normalize(args.state_probes)
     matched_probes = set()
@@ -504,7 +508,7 @@ def main():
             CFBundleDisplayName=app_name,
             CFBundleIdentifier=bundle_id,
             CFBundlePackageType='APPL',
-            CFBundleVersion=args.version,
+            CFBundleVersion=version,
             CFBundleShortVersionString='0.1',
             CFBundleInfoDictionaryVersion='6.0',
             LSMinimumSystemVersion=deploy_target,

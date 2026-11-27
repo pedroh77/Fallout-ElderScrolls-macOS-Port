@@ -17,6 +17,12 @@ WEAK void d3d_backend_draw_up(D3DState *s, uint32_t p, uint32_t n, uint32_t vd, 
 WEAK void d3d_backend_stretch(D3DState *s, uint32_t a, uint32_t b, uint32_t d, uint32_t e, uint32_t f) { (void)s; (void)a; (void)b; (void)d; (void)e; (void)f; }
 WEAK void d3d_backend_colorfill(D3DState *s, uint32_t a, uint32_t b, uint32_t col) { (void)s; (void)a; (void)b; (void)col; }
 WEAK void d3d_backend_readback(D3DState *s, uint32_t a, uint32_t b) { (void)s; (void)a; (void)b; }
+WEAK void d3d_backend_query_issue(D3DState *s, uint32_t q, uint32_t t, uint32_t f) { (void)s; (void)q; (void)t; (void)f; }
+WEAK int d3d_backend_query_getdata(D3DState *s, uint32_t q, uint32_t t, uint32_t *out, uint32_t f) {
+    (void)s; (void)q; (void)f;
+    if (out) *out = (t == 9 ? 1000u : 1u);
+    return 0;
+}
 WEAK void d3d_backend_present(D3DState *s) {
     static uint64_t t0, last_frames, last_draws;
     uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);

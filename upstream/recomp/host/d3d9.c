@@ -386,14 +386,21 @@ static const Ov decl_ov[] = {{"QueryInterface", Unk_QueryInterface}, {"AddRef", 
                              {"GetDevice", Res_GetDevice}, {"GetDeclaration", Decl_GetDeclaration}};
 static void Query_GetType(CPU *c) { RET(c, G32(OBJ_F(COM_THIS(c), 0)), 1); }
 static void Query_GetDataSize(CPU *c) { uint32_t t = G32(OBJ_F(COM_THIS(c), 0)); RET(c, t == 9 ? 4 : t == 8 ? 4 : 4, 1); }
+static void Query_Issue(CPU *c) {
+    uint32_t q = COM_THIS(c), t = G32(OBJ_F(q, 0)), flags = ARG(c, 1);
+    d3d_backend_query_issue(&g_d3d, q, t, flags);
+    RET(c, 0, 2);
+}
 static void Query_GetData(CPU *c) {
-    uint32_t t = G32(OBJ_F(COM_THIS(c), 0)), out = ARG(c, 1), n = ARG(c, 2);
-    if (out && n >= 4) P32(out, t == 9 ? 1000 /* occlusion: visible */ : 1 /* event: done */);
-    RET(c, 0, 4);
+    uint32_t q = COM_THIS(c), t = G32(OBJ_F(q, 0)), out = ARG(c, 1), n = ARG(c, 2), flags = ARG(c, 3);
+    uint32_t val = 0;
+    int rc = d3d_backend_query_getdata(&g_d3d, q, t, &val, flags);
+    if (rc == 0 && out && n >= 4) P32(out, val);
+    RET(c, rc == 0 ? D3D_OK : S_FALSE, 4);
 }
 static const Ov query_ov[] = {{"QueryInterface", Unk_QueryInterface}, {"AddRef", Unk_AddRef}, {"Release", Unk_Release},
                               {"GetDevice", Res_GetDevice}, {"GetType", Query_GetType}, {"GetDataSize", Query_GetDataSize},
-                              {"GetData", Query_GetData}};
+                              {"Issue", Query_Issue}, {"GetData", Query_GetData}};
 static const Ov sb_ov[] = {{"QueryInterface", Unk_QueryInterface}, {"AddRef", Unk_AddRef}, {"Release", Unk_Release},
                            {"GetDevice", Res_GetDevice}};
 
@@ -408,7 +415,7 @@ static int ngrave;
 static uint64_t grave_freed;
 static void bury_locked(uint32_t o) {
     int k = (int)OBJ_KIND(o);
-    if (k != K_TEX && k != K_CUBE && k != K_SURF && k != K_VB && k != K_IB) return;
+    if (k != K_TEX && k != K_CUBE && k != K_SURF && k != K_VB && k != K_IB && k != K_QUERY) return;
     if (k == K_SURF && G32(OBJ_F(o, S_CONT))) return;           // owned by a live texture
     if (ngrave < GRAVE_N) { grave[ngrave].o = o; grave[ngrave].frame = g_d3d.frames; ngrave++; }
 }
@@ -634,7 +641,8 @@ static void Dev_GetIndices(CPU *c) { addref(g_d3d.indices); P32(ARG(c, 1), g_d3d
 static void Dev_CreateQuery(CPU *c) {
     uint32_t type = ARG(c, 1), out = ARG(c, 2);
     if (!out) { RET(c, (type == 8 || type == 9) ? 0 : D3DERR_NOTAVAILABLE, 3); return; }   // support probe
-    uint32_t q = newobj(vt_query, K_QUERY, COM_THIS(c), 1); P32(OBJ_F(q, 0), type);
+    uint32_t q = newobj(vt_query, K_QUERY, COM_THIS(c), 2);
+    P32(OBJ_F(q, 0), type); P32(OBJ_F(q, 1), 0);
     P32(out, q); RET(c, 0, 3);
 }
 static void Dev_StretchRect(CPU *c) { d3d_backend_stretch(&g_d3d, ARG(c, 1), ARG(c, 2), ARG(c, 3), ARG(c, 4), ARG(c, 5)); RET(c, 0, 6); }

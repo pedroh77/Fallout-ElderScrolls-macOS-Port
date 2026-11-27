@@ -36,11 +36,36 @@ extern int fnv_graphics_aa(void);
 // ---- guest object layout (mirrors d3d9.c) ---------------------------------------------------------
 #define OBJ_KIND(o) G32((o) + 8)
 #define OBJ_F(o, i) ((o) + 16 + 4 * (i))
-enum { K_TEX = 1, K_CUBE, K_VOL, K_SURF, K_VB, K_IB, K_DECL, K_VS, K_PS };
+enum { K_TEX = 1, K_CUBE, K_VOL, K_SURF, K_VB, K_IB, K_DECL, K_VS, K_PS, K_QUERY };
 enum { S_W, S_H, S_FMT, S_USAGE, S_POOL, S_DATA, S_PITCH, S_CONT, S_MS, S_LEVEL, S_DIRTY, S_HOST };
 enum { T_W, T_H, T_LEVELS, T_FMT, T_USAGE, T_POOL, T_SURFS, T_FACES, T_LOD, T_DIRTY, T_HOST };
 enum { B_LEN, B_USAGE, B_FMT, B_POOL, B_DATA, B_HOST, B_DIRTY, B_UPS };
+enum { Q_TYPE, Q_HOST };
 #define FCC(a, b, c_, d) ((uint32_t)(a) | ((uint32_t)(b) << 8) | ((uint32_t)(c_) << 16) | ((uint32_t)(d) << 24))
+
+// ---- occlusion / event queries -----------------------------------------------------------------------
+#define VIS_SLOTS 4096u
+#define MAX_QUERY_SLOTS 32u
+static id<MTLBuffer> vis_buf[3];
+// Slot 0 is permanently reserved as the sink for MTLVisibilityResultModeDisabled (offset: 0)
+// because Apple Silicon zeroes that offset across render passes sharing visibilityResultBuffer.
+static uint32_t vis_next = 1;
+static uint64_t next_cmd_seq = 1, completed_cmd_seq = 0;
+typedef struct {
+    int in_use;
+    uint32_t type;        // 8 = EVENT, 9 = OCCLUSION
+    int state;            // 0 = idle, 1 = building (BEGIN), 2 = issued (END)
+    int resolved;
+    int active_in_enc;
+    uint32_t result;
+    uint64_t submit_seq;
+    uint32_t ring_i;
+    uint32_t nslots;
+    uint32_t slots[MAX_QUERY_SLOTS];
+} HQuery;
+static HQuery *hqueries;
+static uint32_t hquery_cap;
+static uint32_t active_occ_idx; // 1-based index into hqueries, 0 = none
 
 // ---- host-side state ------------------------------------------------------------------------------
 static id<MTLDevice> dev;
@@ -461,13 +486,49 @@ static MTLStencilOperation stencilop(uint32_t o) {
 }
 
 // ---- render passes ----------------------------------------------------------------------------------
-static void end_pass(void) { if (enc) { [enc endEncoding]; enc = nil; } }
+static void end_pass(void) {
+    if (enc) {
+        if (active_occ_idx && hqueries[active_occ_idx - 1].active_in_enc) {
+            [enc setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
+            hqueries[active_occ_idx - 1].active_in_enc = 0;
+        }
+        [enc endEncoding];
+        enc = nil;
+    }
+}
 
 static void ensure_cmd(void) { if (!cmd) cmd = [queue commandBuffer]; }
+
+static void mark_cmd_completed(uint64_t seq) {
+    uint64_t prev = __atomic_load_n(&completed_cmd_seq, __ATOMIC_RELAXED);
+    while (prev < seq && !__atomic_compare_exchange_n(&completed_cmd_seq, &prev, seq, 0, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {}
+}
+
+static void flush_cmd(int wait, int is_present) {
+    end_pass();
+    if (!cmd) {
+        if (is_present) ensure_cmd();
+        else return;
+    }
+    id<MTLCommandBuffer> c = cmd;
+    cmd = nil;
+    uint64_t seq = next_cmd_seq++;
+    dispatch_semaphore_t sem = inflight;
+    [c addCompletedHandler:^(id<MTLCommandBuffer> b) {
+        mark_cmd_completed(seq);
+        if (is_present) { perf_gpu_completed(b); dispatch_semaphore_signal(sem); }
+    }];
+    [c commit];
+    if (wait) {
+        [c waitUntilCompleted];
+        mark_cmd_completed(seq);
+    }
+}
 
 static void begin_pass(D3DState *s, uint32_t clear_flags, uint32_t color, float z, uint32_t stencil) {
     end_pass(); ensure_cmd();
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    if (vis_buf[ring_idx]) rp.visibilityResultBuffer = vis_buf[ring_idx];
     for (int i = 0; i < 4; i++) {
         NSUInteger lv, sl; id<MTLTexture> t = surf_target(s->rt[i], &lv, &sl);
         if (!t) continue;
@@ -610,6 +671,20 @@ static uint32_t decl_streams(D3DState *s) {
     uint32_t e = G32(OBJ_F(s->decl, 0)), n = G32(OBJ_F(s->decl, 1)), m = 0;
     for (uint32_t i = 0; i < n; i++, e += 8) { uint16_t st; memcpy(&st, MEM + e, 2); if (st == 0xFF) break; if (st < 16) m |= 1u << st; }
     return m;
+}
+
+static void occ_before_draw(void) {
+    if (!active_occ_idx || !enc || !vis_buf[ring_idx]) return;
+    HQuery *q = &hqueries[active_occ_idx - 1];
+    if (q->active_in_enc) return;
+    if (q->nslots > 0 && q->ring_i != ring_idx) return;
+    if (vis_next >= VIS_SLOTS || q->nslots >= MAX_QUERY_SLOTS) return;
+    uint32_t slot = vis_next++;
+    ((uint64_t *)vis_buf[ring_idx].contents)[slot] = 0;
+    if (q->nslots == 0) q->ring_i = ring_idx;
+    q->slots[q->nslots++] = slot;
+    [enc setVisibilityResultMode:MTLVisibilityResultModeCounting offset:(NSUInteger)slot * sizeof(uint64_t)];
+    q->active_in_enc = 1;
 }
 
 static int setup_draw(D3DState *s) {
@@ -841,6 +916,7 @@ static int setup_draw(D3DState *s) {
             if (ec.vsamp[i] != sm) { [enc setVertexSamplerState:sm atIndex:i]; ec.vsamp[i] = sm; }
         }
     }
+    occ_before_draw();
     return (int)pe->streams | 0x10000;
 }
 
@@ -1054,10 +1130,7 @@ static void d3d_backend_readback_impl(D3DState *s, uint32_t rt, uint32_t dst) {
     } else {
         blit(src, staging, 0, 0, 1);
     }
-    end_pass();
-    [cmd commit];
-    [cmd waitUntilCompleted];
-    cmd = nil;
+    flush_cmd(1, 0);
     uint32_t pitch = 0, sz = 0;
     uint8_t *out = d3d_surf_write_begin(dst, &pitch, &sz);
     if (out) {
@@ -1125,6 +1198,21 @@ static void d3d_backend_dirty_impl(uint32_t o) {
 }
 static void d3d_backend_release_impl(uint32_t o) {
     uint32_t k = OBJ_KIND(o);
+    if (k == K_QUERY) {
+        uint32_t idx = G32(OBJ_F(o, Q_HOST));
+        if (idx && idx <= hquery_cap) {
+            if (active_occ_idx == idx) {
+                if (hqueries[idx - 1].active_in_enc && enc) {
+                    [enc setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
+                }
+                active_occ_idx = 0;
+            }
+            hqueries[idx - 1].in_use = 0;
+            hqueries[idx - 1].active_in_enc = 0;
+            P32(OBJ_F(o, Q_HOST), 0);
+        }
+        return;
+    }
     if (k != K_TEX && k != K_CUBE && k != K_SURF && k != K_VS && k != K_PS && k != K_VB && k != K_IB) return;
     uint32_t i = G32(host_field(o));
     if (!i) return;
@@ -1147,8 +1235,7 @@ static void dump_png(id<MTLTexture> src, uint64_t frame) {
     d.storageMode = MTLStorageModeShared; d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
     id<MTLTexture> t = [dev newTextureWithDescriptor:d];
     blit(src, t, 0, 0, 0);
-    end_pass();
-    [cmd commit]; [cmd waitUntilCompleted]; cmd = nil; ensure_cmd();
+    flush_cmd(1, 0); ensure_cmd();
     size_t w = t.width, h = t.height, bpr = w * 4;
     uint8_t *px = malloc(bpr * h);
     [t getBytes:px bytesPerRow:bpr fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0];
@@ -1623,6 +1710,131 @@ static id<MTLTexture> run_metalfx_spatial(id<MTLTexture> src, NSUInteger outW, N
     return mfx_out;
 }
 
+static uint32_t query_slot(uint32_t o, uint32_t type, int create) {
+    uint32_t idx = G32(OBJ_F(o, Q_HOST));
+    if (idx && idx <= hquery_cap && hqueries[idx - 1].in_use) return idx;
+    if (!create) return 0;
+    for (uint32_t i = 0; i < hquery_cap; i++) {
+        if (!hqueries[i].in_use) {
+            memset(&hqueries[i], 0, sizeof hqueries[i]);
+            hqueries[i].in_use = 1; hqueries[i].type = type;
+            P32(OBJ_F(o, Q_HOST), i + 1);
+            return i + 1;
+        }
+    }
+    uint32_t ncap = hquery_cap ? hquery_cap * 2 : 64;
+    HQuery *nh = realloc(hqueries, (size_t)ncap * sizeof *hqueries);
+    if (!nh) return 0;
+    hqueries = nh;
+    memset(&hqueries[hquery_cap], 0, (size_t)(ncap - hquery_cap) * sizeof *hqueries);
+    idx = hquery_cap + 1;
+    hquery_cap = ncap;
+    hqueries[idx - 1].in_use = 1; hqueries[idx - 1].type = type;
+    P32(OBJ_F(o, Q_HOST), idx);
+    return idx;
+}
+
+static void query_resolve_from_vis(D3DState *s, HQuery *q) {
+    if (q->type == 9) {
+        uint64_t sum = 0;
+        const uint64_t *buf = vis_buf[q->ring_i] ? (const uint64_t *)vis_buf[q->ring_i].contents : NULL;
+        if (buf) {
+            for (uint32_t k = 0; k < q->nslots; k++) sum += buf[q->slots[k]];
+        }
+        if (sum > 0 && s && s->width && s->height) {
+            uint64_t outW = fnv_output_width(), outH = fnv_output_height();
+            uint64_t r_area = (uint64_t)s->width * (uint64_t)s->height;
+            uint64_t l_area = outW * outH;
+            if (outW > s->width && outH > s->height && l_area > r_area) {
+                __uint128_t scaled = ((__uint128_t)sum * l_area + r_area / 2) / r_area;
+                sum = scaled > UINT32_MAX ? UINT32_MAX : (uint64_t)scaled;
+            }
+        }
+        q->result = sum > UINT32_MAX ? UINT32_MAX : (uint32_t)sum;
+    } else {
+        q->result = 1;
+    }
+    q->resolved = 1;
+}
+
+static void occ_reset_ring(D3DState *s, uint32_t ri) {
+    for (uint32_t i = 0; i < hquery_cap; i++) {
+        HQuery *q = &hqueries[i];
+        if (q->in_use && q->type == 9 && q->state == 2 && !q->resolved && q->ring_i == ri) {
+            query_resolve_from_vis(s, q);
+        }
+    }
+    vis_next = 1;
+}
+
+static void d3d_backend_query_issue_impl(D3DState *s, uint32_t o, uint32_t type, uint32_t flags) {
+    (void)s;
+    uint32_t idx = query_slot(o, type, 1);
+    if (!idx) return;
+    HQuery *q = &hqueries[idx - 1];
+    if (type == 9) {
+        if (flags & 2) { // D3DISSUE_BEGIN
+            if (active_occ_idx && active_occ_idx != idx) {
+                HQuery *old = &hqueries[active_occ_idx - 1];
+                if (old->active_in_enc && enc) [enc setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
+                old->active_in_enc = 0;
+            }
+            if (active_occ_idx == idx && q->active_in_enc && enc) {
+                [enc setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
+            }
+            q->state = 1; q->resolved = 0; q->result = 0; q->submit_seq = 0; q->nslots = 0; q->active_in_enc = 0;
+            active_occ_idx = idx;
+        }
+        if (flags & 1) { // D3DISSUE_END
+            if (active_occ_idx == idx) {
+                if (q->active_in_enc && enc) [enc setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
+                q->active_in_enc = 0; active_occ_idx = 0;
+            }
+            if (q->state == 2) {
+                // Keep prior result when Issue(END) repeats without a new BEGIN.
+            } else if (q->state != 1 || q->nslots == 0) {
+                q->state = 2; q->result = 0; q->resolved = 1;
+            } else {
+                q->state = 2;
+                q->submit_seq = cmd ? next_cmd_seq : (next_cmd_seq > 1 ? next_cmd_seq - 1 : 0);
+                q->resolved = 0;
+            }
+        }
+    } else if (type == 8) {
+        if (flags & 1) {
+            q->state = 2; q->result = 1;
+            if (cmd) {
+                q->submit_seq = next_cmd_seq; q->resolved = 0;
+            } else if (next_cmd_seq > 1) {
+                q->submit_seq = next_cmd_seq - 1;
+                q->resolved = (__atomic_load_n(&completed_cmd_seq, __ATOMIC_ACQUIRE) >= q->submit_seq);
+            } else {
+                q->resolved = 1;
+            }
+        }
+    }
+}
+
+static int d3d_backend_query_getdata_impl(D3DState *s, uint32_t o, uint32_t type, uint32_t *out_val, uint32_t flags) {
+    uint32_t idx = query_slot(o, type, 0);
+    if (!idx) { *out_val = (type == 9 ? 0u : 1u); return 0; }
+    HQuery *q = &hqueries[idx - 1];
+    if (q->state == 1) return 1; // S_FALSE: still open between BEGIN and END
+    if (q->state == 0) { *out_val = (type == 9 ? 0u : 1u); return 0; }
+    if (q->resolved) { *out_val = q->result; return 0; }
+    uint64_t done = __atomic_load_n(&completed_cmd_seq, __ATOMIC_ACQUIRE);
+    if (done >= q->submit_seq) {
+        query_resolve_from_vis(s, q);
+        *out_val = q->result;
+        return 0;
+    }
+    if (q->submit_seq == next_cmd_seq && (flags & 1)) {
+        if (cmd) flush_cmd(0, 0);
+        else { query_resolve_from_vis(s, q); *out_val = q->result; return 0; }
+    }
+    return 1;
+}
+
 void d3d_backend_init(D3DState *s) {
     trace_metal = getenv("FNV_TRACE_METAL") != NULL;
     dev = MTLCreateSystemDefaultDevice();
@@ -1643,8 +1855,12 @@ void d3d_backend_init(D3DState *s) {
 
     pipe_tab = calloc(PIPE_TAB, sizeof *pipe_tab); pipe_keep = [NSMutableArray array];
     samp_keep = [NSMutableArray array]; dss_keep = [NSMutableArray array];
-    for (int i = 0; i < 3; i++) ring[i] = [dev newBufferWithLength:RING_SIZE options:MTLResourceStorageModeShared | MTLResourceCPUCacheModeWriteCombined];
-    if (!dev || !queue || !ring[0] || !ring[1] || !ring[2]) {
+    for (int i = 0; i < 3; i++) {
+        ring[i] = [dev newBufferWithLength:RING_SIZE options:MTLResourceStorageModeShared | MTLResourceCPUCacheModeWriteCombined];
+        vis_buf[i] = [dev newBufferWithLength:VIS_SLOTS * sizeof(uint64_t) options:MTLResourceStorageModeShared];
+        if (vis_buf[i]) memset(vis_buf[i].contents, 0, VIS_SLOTS * sizeof(uint64_t));
+    }
+    if (!dev || !queue || !ring[0] || !ring[1] || !ring[2] || !vis_buf[0] || !vis_buf[1] || !vis_buf[2]) {
         fprintf(stderr, "[metal] Metal device, queue, or upload buffers unavailable\n");
         abort();
     }
@@ -1715,10 +1931,7 @@ static void d3d_backend_present_impl(D3DState *s) {
                 [cmd presentDrawable:drawable];
             }
         }
-        dispatch_semaphore_t sem = inflight;
-        [cmd addCompletedHandler:^(id<MTLCommandBuffer> b) { perf_gpu_completed(b); dispatch_semaphore_signal(sem); }];
-        [cmd commit];
-        cmd = nil;
+        flush_cmd(0, 1);
         uint64_t inflight_start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
         dispatch_semaphore_wait(inflight, DISPATCH_TIME_FOREVER);
         frame_perf.inflight_ns += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - inflight_start;
@@ -1726,6 +1939,7 @@ static void d3d_backend_present_impl(D3DState *s) {
         frame_perf.presents++;
         if (ring_off > frame_perf.upload_peak) frame_perf.upload_peak = ring_off;
         ring_idx = (ring_idx + 1) % 3; ring_off = 0;
+        occ_reset_ring(s, ring_idx);
         // stats
         static uint64_t t0, f0, d0;
         uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
@@ -1754,6 +1968,8 @@ void d3d_backend_readback(D3DState *s, uint32_t a, uint32_t b) { LOCKED_BEGIN d3
 void d3d_backend_created(uint32_t o) { LOCKED_BEGIN d3d_backend_created_impl(o); LOCKED_END }
 void d3d_backend_dirty(uint32_t o) { LOCKED_BEGIN d3d_backend_dirty_impl(o); LOCKED_END }
 void d3d_backend_release(uint32_t o) { LOCKED_BEGIN d3d_backend_release_impl(o); LOCKED_END }
+void d3d_backend_query_issue(D3DState *s, uint32_t q, uint32_t t, uint32_t f) { LOCKED_BEGIN d3d_backend_query_issue_impl(s, q, t, f); LOCKED_END }
+int d3d_backend_query_getdata(D3DState *s, uint32_t q, uint32_t t, uint32_t *out, uint32_t f) { int r; LOCKED_BEGIN r = d3d_backend_query_getdata_impl(s, q, t, out, f); LOCKED_END return r; }
 static void pace_60fps(void) {
     static int novsync = -1;
     if (novsync < 0) novsync = getenv("FNV_NOVSYNC") != NULL;

@@ -39,6 +39,8 @@ void d3d_backend_draw_up(D3DState *s, uint32_t prim, uint32_t count, uint32_t vd
 void d3d_backend_stretch(D3DState *s, uint32_t src, uint32_t srect, uint32_t dst, uint32_t drect, uint32_t filter);
 void d3d_backend_colorfill(D3DState *s, uint32_t surf, uint32_t rect, uint32_t color);
 void d3d_backend_readback(D3DState *s, uint32_t rt, uint32_t dst);
+void d3d_backend_query_issue(D3DState *s, uint32_t query, uint32_t type, uint32_t flags);
+int d3d_backend_query_getdata(D3DState *s, uint32_t query, uint32_t type, uint32_t *out_val, uint32_t flags);
 void d3d_backend_present(D3DState *s);
 
 // surface bytes (d3d9.c), wherever they currently live — NULL if never written. The residency lock is
