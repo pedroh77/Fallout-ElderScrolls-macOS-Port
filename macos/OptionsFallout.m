@@ -13,18 +13,57 @@ static NSString *prefKey(NSString *suffix) {
 }
 
 typedef struct {
-    int preset;          // 0=Keep FalloutPrefs.ini, 1=Low, 2=Medium, 3=High, 4=Ultra
-    unsigned renderScale;// 50..100 (default 100 = Native)
-    int upscaler;        // 0=Bilinear, 1=MetalFX Spatial
-    int antiAliasing;    // 0=Off, 1=SMAA, 2=FXAA
-    int textureSize;     // 0=Large (skip 0), 1=Medium (skip 1), 2=Small (skip 2)
-    int anisotropy;      // 0, 2, 4, 8, 15
-    int shadowQuality;   // 0=Off, 1=Medium (256), 2=High (512), 3=Ultra (1024)
-    int waterQuality;    // 0=Low, 1=Medium, 2=High (512), 3=Ultra (1024)
-    int screenEffects;   // 0=Off, 1=Bloom, 2=HDR, 3=HDR + Depth of Field
-    int fovPreset;       // 0=Keep FALLOUT.INI, 1=Original, 2=Expanded, 3=Wide, 4=Custom
-    int worldFov;        // 75..105 (fDefaultWorldFOV)
-    int firstPersonFov;  // 55..75  (fDefault1stPersonFOV)
+    int preset;                  // 0=Keep FalloutPrefs.ini, 1=Low, 2=Medium, 3=High, 4=Ultra
+    unsigned renderScale;        // 50..100 (default 100 = Native)
+    int upscaler;                // 0=Bilinear, 1=MetalFX Spatial
+    int antiAliasing;            // 0=Off, 1=SMAA, 2=FXAA (Metal post-process)
+    int anisotropy;              // 0, 2, 4, 8, 15
+    int screenEffects;           // 0=None, 1=Bloom, 2=HDR
+    BOOL vsync;                  // iPresentInterval (0/1)
+
+    // Advanced -> Detail
+    int textureSize;             // 0=High (skip 0), 1=Medium (skip 1), 2=Low (skip 2)
+    int radialBlurQuality;       // 0=Low, 1=Medium, 2=High
+    BOOL depthOfField;           // bDoDepthOfField
+    BOOL transparencyMultisampling; // bTransparencyMultisampling (stored; forced 0 in INI for Metal)
+    int decalCap;                // 2..10 (iMaxDecalsPerFrame)
+
+    // Advanced -> Water
+    BOOL waterRefractions;       // bUseWaterRefractions
+    BOOL waterReflections;       // bUseWaterReflections
+    int waterReflectionQuality;  // 0=Low (256), 1=Medium (512), 2=High (1024)
+    BOOL waterSoftReflections;   // bUseWaterReflectionBlur / iWaterBlurAmount
+    BOOL waterFullSceneReflections;  // bAutoWaterSilhouetteReflections (inverted: 0=On, 1=Off)
+    BOOL waterFullDetailReflections; // bForceHighDetailReflections
+    BOOL waterDisplacement;      // bUseWaterDisplacements
+    BOOL waterDepthFog;          // bUseWaterDepth
+    int waterMultisampling;      // 0=Low (1), 1=Medium (2), 2=High (4) (forced 0 in INI for Metal)
+
+    // Advanced -> Shadows
+    BOOL enableShadows;          // bDrawShadows
+    int shadowQuality;           // 0=Low (256), 1=Medium (512), 2=High (1024)
+    int shadowFiltering;         // 0=Low (0), 1=Medium (1), 2=High (2)
+    int maxInteriorShadows;      // 2..6 (iActorShadowCountInt)
+    int maxExteriorShadows;      // 2..6 (iActorShadowCountExt)
+
+    // Advanced -> View Distance
+    int objectFade;              // 1..15 (fLODFadeOutMultObjects x1)
+    int actorFade;               // 2..15 (fLODFadeOutMultActors x1)
+    int grassFade;               // 0..7  (fGrassStartFadeDistance x1000)
+    int specularityFade;         // 2..15 (fSpecularLODStartFade x100)
+    int lightFade;               // 2..35 (fLightLODStartFade x100)
+    int itemFade;                // 1..15 (fLODFadeOutMultItems x1)
+    int shadowFade;              // 1..10 (fShadowLODStartFade x100)
+
+    // Advanced -> Distant LOD
+    int treeLodFade;             // 0..40   (fTreeLoadDistance x1000)
+    int objectLodFade;           // 25..50  (fBlockLoadDistanceLow x1000)
+    int landQuality;             // 75..150 (fSplitDistanceMult /100)
+
+    // Port-specific options
+    int fovPreset;               // 0=Keep FALLOUT.INI, 1=Original, 2=Expanded, 3=Wide, 4=Custom
+    int worldFov;                // 75..105 (fDefaultWorldFOV)
+    int firstPersonFov;          // 55..75  (fDefault1stPersonFOV)
     BOOL fullscreen;
     BOOL disableMouseAccel;
     BOOL skipLauncher;
@@ -58,31 +97,167 @@ static int matchingFovPreset(int worldFov, int firstPersonFov) {
     return 4;
 }
 
+// Exact official Windows Fallout 3 / FNV Launcher presets
 static void applyPresetDefaults(FalloutOptions *opts, int preset) {
     switch (preset) {
     case 1: // Low
-        opts->textureSize = 1; opts->anisotropy = 0; opts->shadowQuality = 0;
-        opts->waterQuality = 0; opts->screenEffects = 0;
+        opts->anisotropy = 0;
+        opts->screenEffects = 0; // None
+        opts->textureSize = 1;   // Medium
+        opts->radialBlurQuality = 0; // Low
+        opts->depthOfField = NO;
+        opts->transparencyMultisampling = NO;
+        opts->decalCap = 2;
+
+        opts->waterRefractions = NO;
+        opts->waterReflections = NO;
+        opts->waterReflectionQuality = 0; // Low
+        opts->waterSoftReflections = NO;
+        opts->waterFullSceneReflections = NO;
+        opts->waterFullDetailReflections = NO;
+        opts->waterDisplacement = NO;
+        opts->waterDepthFog = NO;
+        opts->waterMultisampling = 0; // Low
+
+        opts->enableShadows = NO;
+        opts->shadowQuality = 0;   // Low
+        opts->shadowFiltering = 0; // Low
+        opts->maxInteriorShadows = 2;
+        opts->maxExteriorShadows = 2;
+
+        opts->objectFade = 2;
+        opts->actorFade = 2;
+        opts->grassFade = 0;
+        opts->specularityFade = 2;
+        opts->lightFade = 2;
+        opts->itemFade = 1;
+        opts->shadowFade = 1;
+
+        opts->treeLodFade = 0;
+        opts->objectLodFade = 25;
+        opts->landQuality = 75;
         break;
+
     case 2: // Medium
-        opts->textureSize = 0; opts->anisotropy = 2; opts->shadowQuality = 1;
-        opts->waterQuality = 1; opts->screenEffects = 2;
+        opts->anisotropy = 0;    // Off on Windows Medium preset
+        opts->screenEffects = 2; // HDR
+        opts->textureSize = 0;   // High
+        opts->radialBlurQuality = 0; // Low
+        opts->depthOfField = NO;
+        opts->transparencyMultisampling = NO;
+        opts->decalCap = 5;
+
+        opts->waterRefractions = YES;
+        opts->waterReflections = YES;
+        opts->waterReflectionQuality = 1; // Medium
+        opts->waterSoftReflections = NO;
+        opts->waterFullSceneReflections = NO;
+        opts->waterFullDetailReflections = NO;
+        opts->waterDisplacement = YES;
+        opts->waterDepthFog = YES;
+        opts->waterMultisampling = 0; // Low
+
+        opts->enableShadows = YES;
+        opts->shadowQuality = 0;   // Low
+        opts->shadowFiltering = 1; // Medium
+        opts->maxInteriorShadows = 4;
+        opts->maxExteriorShadows = 2;
+
+        opts->objectFade = 2;
+        opts->actorFade = 2;
+        opts->grassFade = 3;
+        opts->specularityFade = 5;
+        opts->lightFade = 10;
+        opts->itemFade = 3;
+        opts->shadowFade = 2;
+
+        opts->treeLodFade = 25;
+        opts->objectLodFade = 50;
+        opts->landQuality = 100;
         break;
+
     case 3: // High
-        opts->textureSize = 0; opts->anisotropy = 8; opts->shadowQuality = 2;
-        opts->waterQuality = 2; opts->screenEffects = 3;
+        opts->anisotropy = 8;
+        opts->screenEffects = 2; // HDR
+        opts->textureSize = 0;   // High
+        opts->radialBlurQuality = 1; // Medium
+        opts->depthOfField = YES;
+        opts->transparencyMultisampling = YES;
+        opts->decalCap = 10;
+
+        opts->waterRefractions = YES;
+        opts->waterReflections = YES;
+        opts->waterReflectionQuality = 1; // Medium
+        opts->waterSoftReflections = YES;
+        opts->waterFullSceneReflections = NO;
+        opts->waterFullDetailReflections = NO;
+        opts->waterDisplacement = YES;
+        opts->waterDepthFog = YES;
+        opts->waterMultisampling = 2; // High
+
+        opts->enableShadows = YES;
+        opts->shadowQuality = 1;   // Medium
+        opts->shadowFiltering = 2; // High
+        opts->maxInteriorShadows = 4;
+        opts->maxExteriorShadows = 2;
+
+        opts->objectFade = 7;
+        opts->actorFade = 6;
+        opts->grassFade = 5;
+        opts->specularityFade = 10;
+        opts->lightFade = 25;
+        opts->itemFade = 4;
+        opts->shadowFade = 4;
+
+        opts->treeLodFade = 26;
+        opts->objectLodFade = 50;
+        opts->landQuality = 100;
         break;
+
     case 4: // Ultra
     default:
-        opts->textureSize = 0; opts->anisotropy = 15; opts->shadowQuality = 3;
-        opts->waterQuality = 3; opts->screenEffects = 3;
+        opts->anisotropy = 15;
+        opts->screenEffects = 2; // HDR
+        opts->textureSize = 0;   // High
+        opts->radialBlurQuality = 2; // High
+        opts->depthOfField = YES;
+        opts->transparencyMultisampling = YES;
+        opts->decalCap = 10;
+
+        opts->waterRefractions = YES;
+        opts->waterReflections = YES;
+        opts->waterReflectionQuality = 2; // High
+        opts->waterSoftReflections = YES;
+        opts->waterFullSceneReflections = YES;
+        opts->waterFullDetailReflections = YES;
+        opts->waterDisplacement = YES;
+        opts->waterDepthFog = YES;
+        opts->waterMultisampling = 2; // High
+
+        opts->enableShadows = YES;
+        opts->shadowQuality = 2;   // High
+        opts->shadowFiltering = 2; // High
+        opts->maxInteriorShadows = 6;
+        opts->maxExteriorShadows = 6;
+
+        opts->objectFade = 15;
+        opts->actorFade = 15;
+        opts->grassFade = 7;
+        opts->specularityFade = 15; // 1500.0000 on Windows Ultra preset
+        opts->lightFade = 35;
+        opts->itemFade = 15;
+        opts->shadowFade = 10;
+
+        opts->treeLodFade = 40;
+        opts->objectLodFade = 50;
+        opts->landQuality = 150;
         break;
     }
 }
 
 static FalloutOptions loadFalloutOptions(void) {
     NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
-    FalloutOptions opts;
+    FalloutOptions opts = {0};
     id pObj = [ud objectForKey:prefKey(@"QualityPreset")];
     opts.preset = pObj ? (int)[pObj integerValue] : 4; // Ultra default
     if (opts.preset < 0 || opts.preset > 4) opts.preset = 4;
@@ -98,16 +273,86 @@ static FalloutOptions loadFalloutOptions(void) {
     opts.antiAliasing = aaObj ? (int)[aaObj integerValue] : 0;
     if (opts.antiAliasing < 0 || opts.antiAliasing > 2) opts.antiAliasing = 0;
 
-    id tObj = [ud objectForKey:prefKey(@"TextureSize")];
-    if (tObj) { opts.textureSize = (int)[tObj integerValue]; if (opts.textureSize < 0 || opts.textureSize > 2) opts.textureSize = 0; }
     id aObj = [ud objectForKey:prefKey(@"Anisotropy")];
-    if (aObj) { opts.anisotropy = (int)[aObj integerValue]; if (opts.anisotropy < 0 || opts.anisotropy > 16) opts.anisotropy = 15; }
-    id sObj = [ud objectForKey:prefKey(@"ShadowQuality")];
-    if (sObj) { opts.shadowQuality = (int)[sObj integerValue]; if (opts.shadowQuality < 0 || opts.shadowQuality > 3) opts.shadowQuality = 3; }
-    id wObj = [ud objectForKey:prefKey(@"WaterQuality")];
-    if (wObj) { opts.waterQuality = (int)[wObj integerValue]; if (opts.waterQuality < 0 || opts.waterQuality > 3) opts.waterQuality = 3; }
+    if (aObj) { opts.anisotropy = clampInt((int)[aObj integerValue], 0, 15); }
     id eObj = [ud objectForKey:prefKey(@"ScreenEffects")];
-    if (eObj) { opts.screenEffects = (int)[eObj integerValue]; if (opts.screenEffects < 0 || opts.screenEffects > 3) opts.screenEffects = 3; }
+    if (eObj) {
+        int raw = (int)[eObj integerValue];
+        // Migrate legacy value 3 ("HDR + Depth of Field") to HDR + DoF=YES
+        if (raw == 3) { opts.screenEffects = 2; opts.depthOfField = YES; }
+        else { opts.screenEffects = clampInt(raw, 0, 2); }
+    }
+    id vsObj = [ud objectForKey:prefKey(@"VSync")];
+    opts.vsync = vsObj ? [vsObj boolValue] : YES;
+
+    // Advanced -> Detail
+    id tObj = [ud objectForKey:prefKey(@"TextureSize")];
+    if (tObj) opts.textureSize = clampInt((int)[tObj integerValue], 0, 2);
+    id rbObj = [ud objectForKey:prefKey(@"RadialBlurQuality")];
+    if (rbObj) opts.radialBlurQuality = clampInt((int)[rbObj integerValue], 0, 2);
+    id dofObj = [ud objectForKey:prefKey(@"DepthOfField")];
+    if (dofObj) opts.depthOfField = [dofObj boolValue];
+    id tmsObj = [ud objectForKey:prefKey(@"TransparencyMultisampling")];
+    if (tmsObj) opts.transparencyMultisampling = [tmsObj boolValue];
+    id dcObj = [ud objectForKey:prefKey(@"DecalCap")];
+    if (dcObj) opts.decalCap = clampInt((int)[dcObj integerValue], 2, 10);
+
+    // Advanced -> Water
+    id wrfObj = [ud objectForKey:prefKey(@"WaterRefractions")];
+    if (wrfObj) opts.waterRefractions = [wrfObj boolValue];
+    id wrlObj = [ud objectForKey:prefKey(@"WaterReflections")];
+    if (wrlObj) opts.waterReflections = [wrlObj boolValue];
+    id wrqObj = [ud objectForKey:prefKey(@"WaterReflectionQuality")];
+    if (wrqObj) opts.waterReflectionQuality = clampInt((int)[wrqObj integerValue], 0, 2);
+    id wsrObj = [ud objectForKey:prefKey(@"WaterSoftReflections")];
+    if (wsrObj) opts.waterSoftReflections = [wsrObj boolValue];
+    id wfsObj = [ud objectForKey:prefKey(@"WaterFullSceneReflections")];
+    if (wfsObj) opts.waterFullSceneReflections = [wfsObj boolValue];
+    id wfdObj = [ud objectForKey:prefKey(@"WaterFullDetailReflections")];
+    if (wfdObj) opts.waterFullDetailReflections = [wfdObj boolValue];
+    id wdObj = [ud objectForKey:prefKey(@"WaterDisplacement")];
+    if (wdObj) opts.waterDisplacement = [wdObj boolValue];
+    id wdfObj = [ud objectForKey:prefKey(@"WaterDepthFog")];
+    if (wdfObj) opts.waterDepthFog = [wdfObj boolValue];
+    id wmsObj = [ud objectForKey:prefKey(@"WaterMultisampling")];
+    if (wmsObj) opts.waterMultisampling = clampInt((int)[wmsObj integerValue], 0, 2);
+
+    // Advanced -> Shadows
+    id esObj = [ud objectForKey:prefKey(@"EnableShadows")];
+    if (esObj) opts.enableShadows = [esObj boolValue];
+    id sqObj = [ud objectForKey:prefKey(@"AdvShadowQuality")];
+    if (sqObj) opts.shadowQuality = clampInt((int)[sqObj integerValue], 0, 2);
+    id sfObj = [ud objectForKey:prefKey(@"ShadowFiltering")];
+    if (sfObj) opts.shadowFiltering = clampInt((int)[sfObj integerValue], 0, 2);
+    id misObj = [ud objectForKey:prefKey(@"MaxInteriorShadows")];
+    if (misObj) opts.maxInteriorShadows = clampInt((int)[misObj integerValue], 2, 6);
+    id mesObj = [ud objectForKey:prefKey(@"MaxExteriorShadows")];
+    if (mesObj) opts.maxExteriorShadows = clampInt((int)[mesObj integerValue], 2, 6);
+
+    // Advanced -> View Distance
+    id ofObj = [ud objectForKey:prefKey(@"ObjectFade")];
+    if (ofObj) opts.objectFade = clampInt((int)[ofObj integerValue], 1, 15);
+    id afObj = [ud objectForKey:prefKey(@"ActorFade")];
+    if (afObj) opts.actorFade = clampInt((int)[afObj integerValue], 2, 15);
+    id gfObj = [ud objectForKey:prefKey(@"GrassFade")];
+    if (gfObj) opts.grassFade = clampInt((int)[gfObj integerValue], 0, 7);
+    id spfObj = [ud objectForKey:prefKey(@"SpecularityFade")];
+    if (spfObj) opts.specularityFade = clampInt((int)[spfObj integerValue], 2, 15);
+    id lfObj = [ud objectForKey:prefKey(@"LightFade")];
+    if (lfObj) opts.lightFade = clampInt((int)[lfObj integerValue], 2, 35);
+    id ifObj = [ud objectForKey:prefKey(@"ItemFade")];
+    if (ifObj) opts.itemFade = clampInt((int)[ifObj integerValue], 1, 15);
+    id shfObj = [ud objectForKey:prefKey(@"ShadowFade")];
+    if (shfObj) opts.shadowFade = clampInt((int)[shfObj integerValue], 1, 10);
+
+    // Advanced -> Distant LOD
+    id tlfObj = [ud objectForKey:prefKey(@"TreeLodFade")];
+    if (tlfObj) opts.treeLodFade = clampInt((int)[tlfObj integerValue], 0, 40);
+    id olfObj = [ud objectForKey:prefKey(@"ObjectLodFade")];
+    if (olfObj) opts.objectLodFade = clampInt((int)[olfObj integerValue], 25, 50);
+    id lqObj = [ud objectForKey:prefKey(@"LandQuality")];
+    if (lqObj) opts.landQuality = clampInt((int)[lqObj integerValue], 75, 150);
+
     id fpObj = [ud objectForKey:prefKey(@"FovPreset")];
     opts.fovPreset = fpObj ? (int)[fpObj integerValue] : 1; // Original default
     if (opts.fovPreset < 0 || opts.fovPreset > 4) opts.fovPreset = 1;
@@ -174,11 +419,44 @@ static void saveFalloutOptions(FalloutOptions opts) {
     [ud setInteger:(NSInteger)opts.renderScale forKey:prefKey(@"RenderScale")];
     [ud setInteger:opts.upscaler forKey:prefKey(@"Upscaler")];
     [ud setInteger:opts.antiAliasing forKey:prefKey(@"AntiAliasing")];
-    [ud setInteger:opts.textureSize forKey:prefKey(@"TextureSize")];
     [ud setInteger:opts.anisotropy forKey:prefKey(@"Anisotropy")];
-    [ud setInteger:opts.shadowQuality forKey:prefKey(@"ShadowQuality")];
-    [ud setInteger:opts.waterQuality forKey:prefKey(@"WaterQuality")];
     [ud setInteger:opts.screenEffects forKey:prefKey(@"ScreenEffects")];
+    [ud setBool:opts.vsync forKey:prefKey(@"VSync")];
+
+    [ud setInteger:opts.textureSize forKey:prefKey(@"TextureSize")];
+    [ud setInteger:opts.radialBlurQuality forKey:prefKey(@"RadialBlurQuality")];
+    [ud setBool:opts.depthOfField forKey:prefKey(@"DepthOfField")];
+    [ud setBool:opts.transparencyMultisampling forKey:prefKey(@"TransparencyMultisampling")];
+    [ud setInteger:opts.decalCap forKey:prefKey(@"DecalCap")];
+
+    [ud setBool:opts.waterRefractions forKey:prefKey(@"WaterRefractions")];
+    [ud setBool:opts.waterReflections forKey:prefKey(@"WaterReflections")];
+    [ud setInteger:opts.waterReflectionQuality forKey:prefKey(@"WaterReflectionQuality")];
+    [ud setBool:opts.waterSoftReflections forKey:prefKey(@"WaterSoftReflections")];
+    [ud setBool:opts.waterFullSceneReflections forKey:prefKey(@"WaterFullSceneReflections")];
+    [ud setBool:opts.waterFullDetailReflections forKey:prefKey(@"WaterFullDetailReflections")];
+    [ud setBool:opts.waterDisplacement forKey:prefKey(@"WaterDisplacement")];
+    [ud setBool:opts.waterDepthFog forKey:prefKey(@"WaterDepthFog")];
+    [ud setInteger:opts.waterMultisampling forKey:prefKey(@"WaterMultisampling")];
+
+    [ud setBool:opts.enableShadows forKey:prefKey(@"EnableShadows")];
+    [ud setInteger:opts.shadowQuality forKey:prefKey(@"AdvShadowQuality")];
+    [ud setInteger:opts.shadowFiltering forKey:prefKey(@"ShadowFiltering")];
+    [ud setInteger:opts.maxInteriorShadows forKey:prefKey(@"MaxInteriorShadows")];
+    [ud setInteger:opts.maxExteriorShadows forKey:prefKey(@"MaxExteriorShadows")];
+
+    [ud setInteger:opts.objectFade forKey:prefKey(@"ObjectFade")];
+    [ud setInteger:opts.actorFade forKey:prefKey(@"ActorFade")];
+    [ud setInteger:opts.grassFade forKey:prefKey(@"GrassFade")];
+    [ud setInteger:opts.specularityFade forKey:prefKey(@"SpecularityFade")];
+    [ud setInteger:opts.lightFade forKey:prefKey(@"LightFade")];
+    [ud setInteger:opts.itemFade forKey:prefKey(@"ItemFade")];
+    [ud setInteger:opts.shadowFade forKey:prefKey(@"ShadowFade")];
+
+    [ud setInteger:opts.treeLodFade forKey:prefKey(@"TreeLodFade")];
+    [ud setInteger:opts.objectLodFade forKey:prefKey(@"ObjectLodFade")];
+    [ud setInteger:opts.landQuality forKey:prefKey(@"LandQuality")];
+
     [ud setInteger:opts.fovPreset forKey:prefKey(@"FovPreset")];
     [ud setInteger:opts.worldFov forKey:prefKey(@"WorldFov")];
     [ud setInteger:opts.firstPersonFov forKey:prefKey(@"FirstPersonFov")];
@@ -194,22 +472,23 @@ static void saveFalloutOptions(FalloutOptions opts) {
 @property (nonatomic) unsigned backingW;
 @property (nonatomic) unsigned backingH;
 @property (nonatomic) int refreshHz;
+@property (nonatomic) FalloutOptions workingOpts;
 @property (nonatomic) FalloutOptions savedOpts;
 @property (nonatomic) BOOL hasSavedOpts;
 @property (nonatomic, copy) void (^onPlay)(FNVLaunchSettings settings);
 
+// Main window controls
 @property (nonatomic, strong) NSWindow *optionsWindow;
 @property (nonatomic, strong) NSPopUpButton *presetPopup;
+@property (nonatomic, strong) NSButton *advancedBtn;
 @property (nonatomic, strong) NSPopUpButton *scalePopup;
 @property (nonatomic, strong) NSPopUpButton *upscalerPopup;
 @property (nonatomic, strong) NSPopUpButton *aaPopup;
 @property (nonatomic, strong) NSTextField *resPreviewLabel;
-@property (nonatomic, strong) NSPopUpButton *texturePopup;
 @property (nonatomic, strong) NSPopUpButton *anisoPopup;
-@property (nonatomic, strong) NSPopUpButton *shadowPopup;
-@property (nonatomic, strong) NSPopUpButton *waterPopup;
 @property (nonatomic, strong) NSPopUpButton *effectsPopup;
 @property (nonatomic, strong) NSPopUpButton *displayPopup;
+@property (nonatomic, strong) NSButton *vsyncCheck;
 @property (nonatomic, strong) NSPopUpButton *fovPresetPopup;
 @property (nonatomic, strong) NSSlider *worldFovSlider;
 @property (nonatomic, strong) NSSlider *firstPersonFovSlider;
@@ -218,6 +497,56 @@ static void saveFalloutOptions(FalloutOptions opts) {
 @property (nonatomic, strong) NSTextField *fovTipLabel;
 @property (nonatomic, strong) NSButton *mouseAccelCheck;
 @property (nonatomic, strong) NSButton *skipLauncherCheck;
+
+// Advanced sheet controls
+@property (nonatomic, strong) NSWindow *advancedWindow;
+// Detail
+@property (nonatomic, strong) NSPopUpButton *advTexturePopup;
+@property (nonatomic, strong) NSPopUpButton *advRadialBlurPopup;
+@property (nonatomic, strong) NSButton *advDofCheck;
+@property (nonatomic, strong) NSButton *advTransMsCheck;
+@property (nonatomic, strong) NSSlider *advDecalCapSlider;
+@property (nonatomic, strong) NSTextField *advDecalCapLabel;
+// Water
+@property (nonatomic, strong) NSButton *advWaterRefrCheck;
+@property (nonatomic, strong) NSButton *advWaterReflCheck;
+@property (nonatomic, strong) NSPopUpButton *advWaterReflQualityPopup;
+@property (nonatomic, strong) NSButton *advWaterSoftReflCheck;
+@property (nonatomic, strong) NSButton *advWaterFullSceneCheck;
+@property (nonatomic, strong) NSButton *advWaterFullDetailCheck;
+@property (nonatomic, strong) NSButton *advWaterDisplacementCheck;
+@property (nonatomic, strong) NSButton *advWaterDepthFogCheck;
+@property (nonatomic, strong) NSPopUpButton *advWaterMsPopup;
+// Shadows
+@property (nonatomic, strong) NSButton *advEnableShadowsCheck;
+@property (nonatomic, strong) NSPopUpButton *advShadowQualityPopup;
+@property (nonatomic, strong) NSPopUpButton *advShadowFilterPopup;
+@property (nonatomic, strong) NSSlider *advMaxIntShadowsSlider;
+@property (nonatomic, strong) NSTextField *advMaxIntShadowsLabel;
+@property (nonatomic, strong) NSSlider *advMaxExtShadowsSlider;
+@property (nonatomic, strong) NSTextField *advMaxExtShadowsLabel;
+// View Distance
+@property (nonatomic, strong) NSSlider *advObjectFadeSlider;
+@property (nonatomic, strong) NSTextField *advObjectFadeLabel;
+@property (nonatomic, strong) NSSlider *advActorFadeSlider;
+@property (nonatomic, strong) NSTextField *advActorFadeLabel;
+@property (nonatomic, strong) NSSlider *advGrassFadeSlider;
+@property (nonatomic, strong) NSTextField *advGrassFadeLabel;
+@property (nonatomic, strong) NSSlider *advSpecFadeSlider;
+@property (nonatomic, strong) NSTextField *advSpecFadeLabel;
+@property (nonatomic, strong) NSSlider *advLightFadeSlider;
+@property (nonatomic, strong) NSTextField *advLightFadeLabel;
+@property (nonatomic, strong) NSSlider *advItemFadeSlider;
+@property (nonatomic, strong) NSTextField *advItemFadeLabel;
+@property (nonatomic, strong) NSSlider *advShadowFadeSlider;
+@property (nonatomic, strong) NSTextField *advShadowFadeLabel;
+// Distant LOD
+@property (nonatomic, strong) NSSlider *advTreeLodSlider;
+@property (nonatomic, strong) NSTextField *advTreeLodLabel;
+@property (nonatomic, strong) NSSlider *advObjectLodSlider;
+@property (nonatomic, strong) NSTextField *advObjectLodLabel;
+@property (nonatomic, strong) NSSlider *advLandQualitySlider;
+@property (nonatomic, strong) NSTextField *advLandQualityLabel;
 @end
 
 @implementation FNVOptionsController
@@ -260,24 +589,25 @@ static void saveFalloutOptions(FalloutOptions opts) {
 
 - (void)updateDetailControlsEnabled {
     BOOL enable = (self.presetPopup.selectedItem.tag != 0);
-    self.texturePopup.enabled = enable;
     self.anisoPopup.enabled = enable;
-    self.shadowPopup.enabled = enable;
-    self.waterPopup.enabled = enable;
     self.effectsPopup.enabled = enable;
+    self.advancedBtn.enabled = enable;
 }
 
 - (void)presetChanged:(id)sender {
     (void)sender;
     int p = (int)self.presetPopup.selectedItem.tag;
     if (p > 0) {
-        FalloutOptions tmp = {0};
+        FalloutOptions tmp = self.workingOpts;
+        tmp.preset = p;
         applyPresetDefaults(&tmp, p);
-        [self.texturePopup selectItemWithTag:tmp.textureSize];
+        self.workingOpts = tmp;
         [self.anisoPopup selectItemWithTag:tmp.anisotropy];
-        [self.shadowPopup selectItemWithTag:tmp.shadowQuality];
-        [self.waterPopup selectItemWithTag:tmp.waterQuality];
         [self.effectsPopup selectItemWithTag:tmp.screenEffects];
+    } else {
+        FalloutOptions tmp = self.workingOpts;
+        tmp.preset = 0;
+        self.workingOpts = tmp;
     }
     [self updateDetailControlsEnabled];
 }
@@ -350,6 +680,346 @@ static void saveFalloutOptions(FalloutOptions opts) {
     [self updateFovUI];
 }
 
+#pragma mark - Advanced Sheet
+
+- (void)updateAdvancedWaterEnabled {
+    BOOL refl = (self.advWaterReflCheck.state == NSControlStateValueOn);
+    self.advWaterReflQualityPopup.enabled = refl;
+    self.advWaterSoftReflCheck.enabled = refl;
+    self.advWaterFullSceneCheck.enabled = refl;
+    self.advWaterFullDetailCheck.enabled = refl;
+}
+
+- (void)updateAdvancedShadowsEnabled {
+    BOOL sh = (self.advEnableShadowsCheck.state == NSControlStateValueOn);
+    self.advShadowQualityPopup.enabled = sh;
+    self.advShadowFilterPopup.enabled = sh;
+    self.advMaxIntShadowsSlider.enabled = sh;
+    self.advMaxExtShadowsSlider.enabled = sh;
+    self.advMaxIntShadowsLabel.textColor = sh ? NSColor.labelColor : NSColor.tertiaryLabelColor;
+    self.advMaxExtShadowsLabel.textColor = sh ? NSColor.labelColor : NSColor.tertiaryLabelColor;
+}
+
+- (void)advWaterReflToggled:(id)sender { (void)sender; [self updateAdvancedWaterEnabled]; }
+- (void)advShadowsToggled:(id)sender { (void)sender; [self updateAdvancedShadowsEnabled]; }
+
+- (void)advSliderChanged:(id)sender {
+    (void)sender;
+    self.advDecalCapLabel.stringValue = [NSString stringWithFormat:@"%d", (int)llround(self.advDecalCapSlider.doubleValue)];
+    self.advMaxIntShadowsLabel.stringValue = [NSString stringWithFormat:@"%d", (int)llround(self.advMaxIntShadowsSlider.doubleValue)];
+    self.advMaxExtShadowsLabel.stringValue = [NSString stringWithFormat:@"%d", (int)llround(self.advMaxExtShadowsSlider.doubleValue)];
+    self.advObjectFadeLabel.stringValue = [NSString stringWithFormat:@"%d", (int)llround(self.advObjectFadeSlider.doubleValue)];
+    self.advActorFadeLabel.stringValue = [NSString stringWithFormat:@"%d", (int)llround(self.advActorFadeSlider.doubleValue)];
+    self.advGrassFadeLabel.stringValue = [NSString stringWithFormat:@"%d", (int)llround(self.advGrassFadeSlider.doubleValue)];
+    self.advSpecFadeLabel.stringValue = [NSString stringWithFormat:@"%d", (int)llround(self.advSpecFadeSlider.doubleValue)];
+    self.advLightFadeLabel.stringValue = [NSString stringWithFormat:@"%d", (int)llround(self.advLightFadeSlider.doubleValue)];
+    self.advItemFadeLabel.stringValue = [NSString stringWithFormat:@"%d", (int)llround(self.advItemFadeSlider.doubleValue)];
+    self.advShadowFadeLabel.stringValue = [NSString stringWithFormat:@"%d", (int)llround(self.advShadowFadeSlider.doubleValue)];
+    self.advTreeLodLabel.stringValue = [NSString stringWithFormat:@"%d", (int)llround(self.advTreeLodSlider.doubleValue)];
+    self.advObjectLodLabel.stringValue = [NSString stringWithFormat:@"%d", (int)llround(self.advObjectLodSlider.doubleValue)];
+    self.advLandQualityLabel.stringValue = [NSString stringWithFormat:@"%d", (int)llround(self.advLandQualitySlider.doubleValue)];
+}
+
+- (void)populateAdvancedControlsFrom:(FalloutOptions)opts {
+    [self.advTexturePopup selectItemWithTag:opts.textureSize];
+    [self.advRadialBlurPopup selectItemWithTag:opts.radialBlurQuality];
+    self.advDofCheck.state = opts.depthOfField ? NSControlStateValueOn : NSControlStateValueOff;
+    self.advTransMsCheck.state = opts.transparencyMultisampling ? NSControlStateValueOn : NSControlStateValueOff;
+    self.advDecalCapSlider.integerValue = opts.decalCap;
+
+    self.advWaterRefrCheck.state = opts.waterRefractions ? NSControlStateValueOn : NSControlStateValueOff;
+    self.advWaterReflCheck.state = opts.waterReflections ? NSControlStateValueOn : NSControlStateValueOff;
+    [self.advWaterReflQualityPopup selectItemWithTag:opts.waterReflectionQuality];
+    self.advWaterSoftReflCheck.state = opts.waterSoftReflections ? NSControlStateValueOn : NSControlStateValueOff;
+    self.advWaterFullSceneCheck.state = opts.waterFullSceneReflections ? NSControlStateValueOn : NSControlStateValueOff;
+    self.advWaterFullDetailCheck.state = opts.waterFullDetailReflections ? NSControlStateValueOn : NSControlStateValueOff;
+    self.advWaterDisplacementCheck.state = opts.waterDisplacement ? NSControlStateValueOn : NSControlStateValueOff;
+    self.advWaterDepthFogCheck.state = opts.waterDepthFog ? NSControlStateValueOn : NSControlStateValueOff;
+    [self.advWaterMsPopup selectItemWithTag:opts.waterMultisampling];
+
+    self.advEnableShadowsCheck.state = opts.enableShadows ? NSControlStateValueOn : NSControlStateValueOff;
+    [self.advShadowQualityPopup selectItemWithTag:opts.shadowQuality];
+    [self.advShadowFilterPopup selectItemWithTag:opts.shadowFiltering];
+    self.advMaxIntShadowsSlider.integerValue = opts.maxInteriorShadows;
+    self.advMaxExtShadowsSlider.integerValue = opts.maxExteriorShadows;
+
+    self.advObjectFadeSlider.integerValue = opts.objectFade;
+    self.advActorFadeSlider.integerValue = opts.actorFade;
+    self.advGrassFadeSlider.integerValue = opts.grassFade;
+    self.advSpecFadeSlider.integerValue = opts.specularityFade;
+    self.advLightFadeSlider.integerValue = opts.lightFade;
+    self.advItemFadeSlider.integerValue = opts.itemFade;
+    self.advShadowFadeSlider.integerValue = opts.shadowFade;
+
+    self.advTreeLodSlider.integerValue = opts.treeLodFade;
+    self.advObjectLodSlider.integerValue = opts.objectLodFade;
+    self.advLandQualitySlider.integerValue = opts.landQuality;
+
+    [self advSliderChanged:nil];
+    [self updateAdvancedWaterEnabled];
+    [self updateAdvancedShadowsEnabled];
+}
+
+- (void)readAdvancedControlsInto:(FalloutOptions *)opts {
+    opts->textureSize = (int)self.advTexturePopup.selectedItem.tag;
+    opts->radialBlurQuality = (int)self.advRadialBlurPopup.selectedItem.tag;
+    opts->depthOfField = (self.advDofCheck.state == NSControlStateValueOn);
+    opts->transparencyMultisampling = (self.advTransMsCheck.state == NSControlStateValueOn);
+    opts->decalCap = clampInt((int)llround(self.advDecalCapSlider.doubleValue), 2, 10);
+
+    opts->waterRefractions = (self.advWaterRefrCheck.state == NSControlStateValueOn);
+    opts->waterReflections = (self.advWaterReflCheck.state == NSControlStateValueOn);
+    opts->waterReflectionQuality = (int)self.advWaterReflQualityPopup.selectedItem.tag;
+    opts->waterSoftReflections = (self.advWaterSoftReflCheck.state == NSControlStateValueOn);
+    opts->waterFullSceneReflections = (self.advWaterFullSceneCheck.state == NSControlStateValueOn);
+    opts->waterFullDetailReflections = (self.advWaterFullDetailCheck.state == NSControlStateValueOn);
+    opts->waterDisplacement = (self.advWaterDisplacementCheck.state == NSControlStateValueOn);
+    opts->waterDepthFog = (self.advWaterDepthFogCheck.state == NSControlStateValueOn);
+    opts->waterMultisampling = (int)self.advWaterMsPopup.selectedItem.tag;
+
+    opts->enableShadows = (self.advEnableShadowsCheck.state == NSControlStateValueOn);
+    opts->shadowQuality = (int)self.advShadowQualityPopup.selectedItem.tag;
+    opts->shadowFiltering = (int)self.advShadowFilterPopup.selectedItem.tag;
+    opts->maxInteriorShadows = clampInt((int)llround(self.advMaxIntShadowsSlider.doubleValue), 2, 6);
+    opts->maxExteriorShadows = clampInt((int)llround(self.advMaxExtShadowsSlider.doubleValue), 2, 6);
+
+    opts->objectFade = clampInt((int)llround(self.advObjectFadeSlider.doubleValue), 1, 15);
+    opts->actorFade = clampInt((int)llround(self.advActorFadeSlider.doubleValue), 2, 15);
+    opts->grassFade = clampInt((int)llround(self.advGrassFadeSlider.doubleValue), 0, 7);
+    opts->specularityFade = clampInt((int)llround(self.advSpecFadeSlider.doubleValue), 2, 15);
+    opts->lightFade = clampInt((int)llround(self.advLightFadeSlider.doubleValue), 2, 35);
+    opts->itemFade = clampInt((int)llround(self.advItemFadeSlider.doubleValue), 1, 15);
+    opts->shadowFade = clampInt((int)llround(self.advShadowFadeSlider.doubleValue), 1, 10);
+
+    opts->treeLodFade = clampInt((int)llround(self.advTreeLodSlider.doubleValue), 0, 40);
+    opts->objectLodFade = clampInt((int)llround(self.advObjectLodSlider.doubleValue), 25, 50);
+    opts->landQuality = clampInt((int)llround(self.advLandQualitySlider.doubleValue), 75, 150);
+}
+
+- (void)ensureAdvancedWindow {
+    if (self.advancedWindow) return;
+
+    NSRect rect = NSMakeRect(0, 0, 470, 382);
+    self.advancedWindow = [[NSWindow alloc] initWithContentRect:rect
+                                                      styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
+                                                        backing:NSBackingStoreBuffered
+                                                          defer:NO];
+    self.advancedWindow.title = [NSString stringWithFormat:@"%@ — Advanced Options", GAME_TITLE];
+    self.advancedWindow.releasedWhenClosed = NO;
+    NSView *cv = self.advancedWindow.contentView;
+
+    NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(16, 54, 438, 314)];
+    [cv addSubview:tabs];
+
+    NSTextField *(^mkLabel)(NSView *, NSString *, CGFloat, CGFloat, CGFloat) =
+        ^NSTextField *(NSView *v, NSString *txt, CGFloat x, CGFloat y, CGFloat w) {
+        NSTextField *l = [NSTextField labelWithString:txt];
+        l.alignment = NSTextAlignmentRight;
+        l.frame = NSMakeRect(x, y, w, 20);
+        [v addSubview:l];
+        return l;
+    };
+    NSPopUpButton *(^mkLMHPopup)(NSView *, CGFloat, CGFloat, CGFloat, BOOL) =
+        ^NSPopUpButton *(NSView *v, CGFloat x, CGFloat y, CGFloat w, BOOL invertTags) {
+        NSPopUpButton *p = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(x, y, w, 26) pullsDown:NO];
+        if (invertTags) {
+            // Texture quality: iTexMipMapSkip 2=Low, 1=Medium, 0=High
+            [p addItemWithTitle:@"Low"];    p.lastItem.tag = 2;
+            [p addItemWithTitle:@"Medium"]; p.lastItem.tag = 1;
+            [p addItemWithTitle:@"High"];   p.lastItem.tag = 0;
+        } else {
+            [p addItemWithTitle:@"Low"];    p.lastItem.tag = 0;
+            [p addItemWithTitle:@"Medium"]; p.lastItem.tag = 1;
+            [p addItemWithTitle:@"High"];   p.lastItem.tag = 2;
+        }
+        [v addSubview:p];
+        return p;
+    };
+    void (^mkSliderRow)(NSView *, NSString *, CGFloat, int, int, NSSlider *__strong *, NSTextField *__strong *) =
+        ^(NSView *v, NSString *txt, CGFloat y, int lo, int hi, NSSlider *__strong *outS, NSTextField *__strong *outL) {
+        mkLabel(v, txt, 8, y, 146);
+        NSSlider *s = [NSSlider sliderWithValue:lo minValue:lo maxValue:hi target:self action:@selector(advSliderChanged:)];
+        s.frame = NSMakeRect(162, y - 2, 198, 24);
+        s.continuous = YES;
+        [v addSubview:s];
+        NSTextField *val = [NSTextField labelWithString:@""];
+        val.font = [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightRegular];
+        val.alignment = NSTextAlignmentRight;
+        val.frame = NSMakeRect(366, y, 40, 20);
+        [v addSubview:val];
+        *outS = s;
+        *outL = val;
+    };
+
+    // --- Tab 1: Detail ---
+    NSTabViewItem *detailItem = [[NSTabViewItem alloc] initWithIdentifier:@"detail"];
+    detailItem.label = @"Detail";
+    NSView *dv = detailItem.view;
+    mkLabel(dv, @"Texture Quality:", 12, 232, 165);
+    self.advTexturePopup = mkLMHPopup(dv, 186, 230, 180, YES);
+    mkLabel(dv, @"Radial Blur Quality:", 12, 198, 165);
+    self.advRadialBlurPopup = mkLMHPopup(dv, 186, 196, 180, NO);
+    self.advDofCheck = [NSButton checkboxWithTitle:@"Depth of Field" target:nil action:nil];
+    self.advDofCheck.frame = NSMakeRect(186, 164, 210, 18);
+    [dv addSubview:self.advDofCheck];
+    self.advTransMsCheck = [NSButton checkboxWithTitle:@"Transparency Multisampling" target:nil action:nil];
+    self.advTransMsCheck.frame = NSMakeRect(186, 138, 220, 18);
+    [dv addSubview:self.advTransMsCheck];
+    NSSlider *sDecal = nil; NSTextField *lDecal = nil;
+    mkSliderRow(dv, @"Decal Cap:", 98, 2, 10, &sDecal, &lDecal);
+    self.advDecalCapSlider = sDecal; self.advDecalCapLabel = lDecal;
+    [tabs addTabViewItem:detailItem];
+
+    // --- Tab 2: Water ---
+    NSTabViewItem *waterItem = [[NSTabViewItem alloc] initWithIdentifier:@"water"];
+    waterItem.label = @"Water";
+    NSView *wv = waterItem.view;
+    self.advWaterRefrCheck = [NSButton checkboxWithTitle:@"Water Refractions" target:nil action:nil];
+    self.advWaterRefrCheck.frame = NSMakeRect(24, 240, 200, 18);
+    [wv addSubview:self.advWaterRefrCheck];
+    self.advWaterReflCheck = [NSButton checkboxWithTitle:@"Water Reflections" target:self action:@selector(advWaterReflToggled:)];
+    self.advWaterReflCheck.frame = NSMakeRect(24, 214, 200, 18);
+    [wv addSubview:self.advWaterReflCheck];
+    mkLabel(wv, @"Reflection Quality:", 28, 182, 138);
+    self.advWaterReflQualityPopup = mkLMHPopup(wv, 174, 180, 160, NO);
+    self.advWaterSoftReflCheck = [NSButton checkboxWithTitle:@"Soft Reflections" target:nil action:nil];
+    self.advWaterSoftReflCheck.frame = NSMakeRect(48, 152, 220, 18);
+    [wv addSubview:self.advWaterSoftReflCheck];
+    self.advWaterFullSceneCheck = [NSButton checkboxWithTitle:@"Full Scene Reflections" target:nil action:nil];
+    self.advWaterFullSceneCheck.frame = NSMakeRect(48, 128, 220, 18);
+    [wv addSubview:self.advWaterFullSceneCheck];
+    self.advWaterFullDetailCheck = [NSButton checkboxWithTitle:@"Full Detail Reflections" target:nil action:nil];
+    self.advWaterFullDetailCheck.frame = NSMakeRect(48, 104, 220, 18);
+    [wv addSubview:self.advWaterFullDetailCheck];
+    self.advWaterDisplacementCheck = [NSButton checkboxWithTitle:@"Water Displacement" target:nil action:nil];
+    self.advWaterDisplacementCheck.frame = NSMakeRect(24, 74, 200, 18);
+    [wv addSubview:self.advWaterDisplacementCheck];
+    self.advWaterDepthFogCheck = [NSButton checkboxWithTitle:@"Depth Fog" target:nil action:nil];
+    self.advWaterDepthFogCheck.frame = NSMakeRect(228, 74, 160, 18);
+    [wv addSubview:self.advWaterDepthFogCheck];
+    mkLabel(wv, @"Water Multisampling:", 16, 36, 150);
+    self.advWaterMsPopup = mkLMHPopup(wv, 174, 34, 160, NO);
+    [tabs addTabViewItem:waterItem];
+
+    // --- Tab 3: Shadows ---
+    NSTabViewItem *shadowsItem = [[NSTabViewItem alloc] initWithIdentifier:@"shadows"];
+    shadowsItem.label = @"Shadows";
+    NSView *sv = shadowsItem.view;
+    self.advEnableShadowsCheck = [NSButton checkboxWithTitle:@"Enable Shadows" target:self action:@selector(advShadowsToggled:)];
+    self.advEnableShadowsCheck.frame = NSMakeRect(24, 236, 200, 18);
+    [sv addSubview:self.advEnableShadowsCheck];
+    mkLabel(sv, @"Shadow Quality:", 12, 198, 146);
+    self.advShadowQualityPopup = mkLMHPopup(sv, 166, 196, 180, NO);
+    mkLabel(sv, @"Shadow Filtering:", 12, 164, 146);
+    self.advShadowFilterPopup = mkLMHPopup(sv, 166, 162, 180, NO);
+    NSSlider *sInt = nil; NSTextField *lInt = nil;
+    mkSliderRow(sv, @"Max Interior Shadows:", 122, 2, 6, &sInt, &lInt);
+    self.advMaxIntShadowsSlider = sInt; self.advMaxIntShadowsLabel = lInt;
+    NSSlider *sExt = nil; NSTextField *lExt = nil;
+    mkSliderRow(sv, @"Max Exterior Shadows:", 86, 2, 6, &sExt, &lExt);
+    self.advMaxExtShadowsSlider = sExt; self.advMaxExtShadowsLabel = lExt;
+    [tabs addTabViewItem:shadowsItem];
+
+    // --- Tab 4: View Distance ---
+    NSTabViewItem *vdItem = [[NSTabViewItem alloc] initWithIdentifier:@"viewdistance"];
+    vdItem.label = @"View Distance";
+    NSView *vv = vdItem.view;
+    NSSlider *sObj = nil, *sAct = nil, *sGr = nil, *sSp = nil, *sLi = nil, *sIt = nil, *sSh = nil;
+    NSTextField *lObj = nil, *lAct = nil, *lGr = nil, *lSp = nil, *lLi = nil, *lIt = nil, *lSh = nil;
+    mkSliderRow(vv, @"Object Fade:",      236, 1, 15, &sObj, &lObj);
+    mkSliderRow(vv, @"Actor Fade:",       202, 2, 15, &sAct, &lAct);
+    mkSliderRow(vv, @"Grass Fade:",       168, 0,  7, &sGr,  &lGr);
+    mkSliderRow(vv, @"Specularity Fade:", 134, 2, 15, &sSp,  &lSp);
+    mkSliderRow(vv, @"Light Fade:",       100, 2, 35, &sLi,  &lLi);
+    mkSliderRow(vv, @"Item Fade:",         66, 1, 15, &sIt,  &lIt);
+    mkSliderRow(vv, @"Shadow Fade:",       32, 1, 10, &sSh,  &lSh);
+    self.advObjectFadeSlider = sObj; self.advObjectFadeLabel = lObj;
+    self.advActorFadeSlider  = sAct; self.advActorFadeLabel  = lAct;
+    self.advGrassFadeSlider  = sGr;  self.advGrassFadeLabel  = lGr;
+    self.advSpecFadeSlider   = sSp;  self.advSpecFadeLabel   = lSp;
+    self.advLightFadeSlider  = sLi;  self.advLightFadeLabel  = lLi;
+    self.advItemFadeSlider   = sIt;  self.advItemFadeLabel   = lIt;
+    self.advShadowFadeSlider = sSh;  self.advShadowFadeLabel = lSh;
+    [tabs addTabViewItem:vdItem];
+
+    // --- Tab 5: Distant LOD ---
+    NSTabViewItem *lodItem = [[NSTabViewItem alloc] initWithIdentifier:@"lod"];
+    lodItem.label = @"Distant LOD";
+    NSView *lv = lodItem.view;
+    NSSlider *sTree = nil, *sObjLod = nil, *sLand = nil;
+    NSTextField *lTree = nil, *lObjLod = nil, *lLand = nil;
+    mkSliderRow(lv, @"Tree LOD Fade:",   214,  0,  40, &sTree,   &lTree);
+    mkSliderRow(lv, @"Object LOD Fade:", 172, 25,  50, &sObjLod, &lObjLod);
+    mkSliderRow(lv, @"Land Quality:",    130, 75, 150, &sLand,   &lLand);
+    self.advTreeLodSlider     = sTree;   self.advTreeLodLabel     = lTree;
+    self.advObjectLodSlider   = sObjLod; self.advObjectLodLabel   = lObjLod;
+    self.advLandQualitySlider = sLand;   self.advLandQualityLabel = lLand;
+    [tabs addTabViewItem:lodItem];
+
+    NSButton *resetBtn = [NSButton buttonWithTitle:@"Reset to Preset" target:self action:@selector(advResetClicked:)];
+    resetBtn.frame = NSMakeRect(16, 14, 130, 30);
+    [cv addSubview:resetBtn];
+
+    NSButton *cancelBtn = [NSButton buttonWithTitle:@"Cancel" target:self action:@selector(advCancelClicked:)];
+    cancelBtn.frame = NSMakeRect(274, 14, 86, 30);
+    cancelBtn.keyEquivalent = @"\033";
+    [cv addSubview:cancelBtn];
+
+    NSButton *okBtn = [NSButton buttonWithTitle:@"OK" target:self action:@selector(advOkClicked:)];
+    okBtn.frame = NSMakeRect(368, 14, 86, 30);
+    okBtn.keyEquivalent = @"\r";
+    [cv addSubview:okBtn];
+}
+
+- (void)advancedClicked:(id)sender {
+    (void)sender;
+    [self ensureAdvancedWindow];
+    [self populateAdvancedControlsFrom:self.workingOpts];
+    [self.optionsWindow beginSheet:self.advancedWindow completionHandler:nil];
+}
+
+- (void)advResetClicked:(id)sender {
+    (void)sender;
+    int p = (int)self.presetPopup.selectedItem.tag;
+    if (p <= 0) p = 4;
+    FalloutOptions tmp = self.workingOpts;
+    applyPresetDefaults(&tmp, p);
+    [self populateAdvancedControlsFrom:tmp];
+}
+
+- (void)advCancelClicked:(id)sender {
+    (void)sender;
+    [self.optionsWindow endSheet:self.advancedWindow returnCode:NSModalResponseCancel];
+}
+
+- (void)advOkClicked:(id)sender {
+    (void)sender;
+    FalloutOptions tmp = self.workingOpts;
+    [self readAdvancedControlsInto:&tmp];
+    self.workingOpts = tmp;
+    [self.optionsWindow endSheet:self.advancedWindow returnCode:NSModalResponseOK];
+}
+
+- (void)exploreGameDataClicked:(id)sender {
+    (void)sender;
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSURL *dir = nil;
+    const char *envRoot = getenv("FNV_ROOT");
+    if (envRoot && envRoot[0]) {
+        dir = [NSURL fileURLWithPath:@(envRoot) isDirectory:YES];
+    } else {
+        NSURL *bundleGameData = [NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"GameData" isDirectory:YES];
+        if ([fm fileExistsAtPath:bundleGameData.path]) {
+            dir = bundleGameData;
+        } else {
+            dir = [NSURL fileURLWithPath:fm.currentDirectoryPath isDirectory:YES];
+        }
+    }
+    if (dir) {
+        [NSWorkspace.sharedWorkspace openURL:dir];
+    }
+}
+
 - (void)quitClicked:(id)sender {
     (void)sender;
     [NSApp terminate:nil];
@@ -357,16 +1027,14 @@ static void saveFalloutOptions(FalloutOptions opts) {
 
 - (void)playClicked:(id)sender {
     (void)sender;
-    FalloutOptions opts;
+    FalloutOptions opts = self.workingOpts;
     opts.preset = (int)self.presetPopup.selectedItem.tag;
     opts.renderScale = (unsigned)self.scalePopup.selectedItem.tag;
     opts.upscaler = (int)self.upscalerPopup.selectedItem.tag;
     opts.antiAliasing = (int)self.aaPopup.selectedItem.tag;
-    opts.textureSize = (int)self.texturePopup.selectedItem.tag;
     opts.anisotropy = (int)self.anisoPopup.selectedItem.tag;
-    opts.shadowQuality = (int)self.shadowPopup.selectedItem.tag;
-    opts.waterQuality = (int)self.waterPopup.selectedItem.tag;
     opts.screenEffects = (int)self.effectsPopup.selectedItem.tag;
+    opts.vsync = (self.vsyncCheck.state == NSControlStateValueOn);
     opts.fovPreset = (int)self.fovPresetPopup.selectedItem.tag;
     opts.worldFov = clampInt((int)llround(self.worldFovSlider.doubleValue), 75, 105);
     opts.firstPersonFov = clampInt((int)llround(self.firstPersonFovSlider.doubleValue), 55, 75);
@@ -374,6 +1042,7 @@ static void saveFalloutOptions(FalloutOptions opts) {
     opts.disableMouseAccel = (self.mouseAccelCheck.state == NSControlStateValueOn);
     opts.skipLauncher = (self.skipLauncherCheck.state == NSControlStateValueOn);
     saveFalloutOptions(opts);
+
     const char *envScale = getenv("FNV_RENDER_SCALE");
     if (envScale && envScale[0]) {
         unsigned v = (unsigned)strtoul(envScale, NULL, 10);
@@ -415,8 +1084,9 @@ static void saveFalloutOptions(FalloutOptions opts) {
                                  onPlay:(void (^)(FNVLaunchSettings settings))onPlay {
     self.onPlay = onPlay;
     FalloutOptions opts = loadFalloutOptions();
+    self.workingOpts = opts;
 
-    NSRect rect = NSMakeRect(0, 0, 480, 653);
+    NSRect rect = NSMakeRect(0, 0, 480, 584);
     self.optionsWindow = [[NSWindow alloc] initWithContentRect:rect
                                                      styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
                                                        backing:NSBackingStoreBuffered
@@ -428,7 +1098,7 @@ static void saveFalloutOptions(FalloutOptions opts) {
 
     NSTextField *title = [NSTextField labelWithString:@"Graphics & Input Options"];
     title.font = [NSFont boldSystemFontOfSize:15];
-    title.frame = NSMakeRect(24, 617, 432, 22);
+    title.frame = NSMakeRect(24, 548, 432, 22);
     [cv addSubview:title];
 
     NSString *dispStr = (self.backingW != self.nativeW || self.backingH != self.nativeH)
@@ -439,10 +1109,10 @@ static void saveFalloutOptions(FalloutOptions opts) {
     NSTextField *sub = [NSTextField labelWithString:dispStr];
     sub.font = [NSFont systemFontOfSize:12];
     sub.textColor = NSColor.secondaryLabelColor;
-    sub.frame = NSMakeRect(24, 597, 432, 16);
+    sub.frame = NSMakeRect(24, 528, 432, 16);
     [cv addSubview:sub];
 
-    NSBox *sep1 = [[NSBox alloc] initWithFrame:NSMakeRect(24, 588, 432, 1)];
+    NSBox *sep1 = [[NSBox alloc] initWithFrame:NSMakeRect(24, 519, 432, 1)];
     sep1.boxType = NSBoxSeparator;
     [cv addSubview:sep1];
 
@@ -459,8 +1129,8 @@ static void saveFalloutOptions(FalloutOptions opts) {
         return p;
     };
 
-    mkLabel(@"Quality Preset:", 554);
-    self.presetPopup = mkPopup(552);
+    mkLabel(@"Quality Preset:", 485);
+    self.presetPopup = mkPopup(483);
     [self.presetPopup addItemWithTitle:@"Ultra (Recommended)"]; self.presetPopup.lastItem.tag = 4;
     [self.presetPopup addItemWithTitle:@"High"]; self.presetPopup.lastItem.tag = 3;
     [self.presetPopup addItemWithTitle:@"Medium"]; self.presetPopup.lastItem.tag = 2;
@@ -470,8 +1140,8 @@ static void saveFalloutOptions(FalloutOptions opts) {
     self.presetPopup.target = self;
     self.presetPopup.action = @selector(presetChanged:);
 
-    mkLabel(@"Render Scale:", 523);
-    self.scalePopup = mkPopup(521);
+    mkLabel(@"Render Scale:", 454);
+    self.scalePopup = mkPopup(452);
     [self.scalePopup addItemWithTitle:@"100% (Native)"]; self.scalePopup.lastItem.tag = 100;
     [self.scalePopup addItemWithTitle:@"85% (Ultra Quality)"]; self.scalePopup.lastItem.tag = 85;
     [self.scalePopup addItemWithTitle:@"75% (Quality)"]; self.scalePopup.lastItem.tag = 75;
@@ -484,69 +1154,50 @@ static void saveFalloutOptions(FalloutOptions opts) {
     self.resPreviewLabel = [NSTextField labelWithString:@""];
     self.resPreviewLabel.font = [NSFont systemFontOfSize:11];
     self.resPreviewLabel.textColor = NSColor.secondaryLabelColor;
-    self.resPreviewLabel.frame = NSMakeRect(198, 502, 258, 15);
+    self.resPreviewLabel.frame = NSMakeRect(198, 433, 258, 15);
     [cv addSubview:self.resPreviewLabel];
 
-    mkLabel(@"Upscaler:", 474);
-    self.upscalerPopup = mkPopup(472);
+    mkLabel(@"Upscaler:", 405);
+    self.upscalerPopup = mkPopup(403);
     [self.upscalerPopup addItemWithTitle:@"MetalFX Spatial"]; self.upscalerPopup.lastItem.tag = 1;
     [self.upscalerPopup addItemWithTitle:@"Bilinear"]; self.upscalerPopup.lastItem.tag = 0;
     [self.upscalerPopup selectItemWithTag:opts.upscaler];
     self.upscalerPopup.target = self;
     self.upscalerPopup.action = @selector(upscalerChanged:);
 
-    mkLabel(@"Anti-Aliasing:", 443);
-    self.aaPopup = mkPopup(441);
+    mkLabel(@"Anti-Aliasing:", 374);
+    self.aaPopup = mkPopup(372);
     [self.aaPopup addItemWithTitle:@"Off"]; self.aaPopup.lastItem.tag = 0;
     [self.aaPopup addItemWithTitle:@"SMAA 1x (Post-Process)"]; self.aaPopup.lastItem.tag = 1;
     [self.aaPopup addItemWithTitle:@"FXAA (Post-Process)"]; self.aaPopup.lastItem.tag = 2;
     [self.aaPopup selectItemWithTag:opts.antiAliasing];
 
-    mkLabel(@"Texture Size:", 412);
-    self.texturePopup = mkPopup(410);
-    [self.texturePopup addItemWithTitle:@"Large (High)"]; self.texturePopup.lastItem.tag = 0;
-    [self.texturePopup addItemWithTitle:@"Medium"]; self.texturePopup.lastItem.tag = 1;
-    [self.texturePopup addItemWithTitle:@"Small (Low)"]; self.texturePopup.lastItem.tag = 2;
-    [self.texturePopup selectItemWithTag:opts.textureSize];
-
-    mkLabel(@"Anisotropic Filtering:", 381);
-    self.anisoPopup = mkPopup(379);
-    [self.anisoPopup addItemWithTitle:@"15x (Max)"]; self.anisoPopup.lastItem.tag = 15;
-    [self.anisoPopup addItemWithTitle:@"8x"]; self.anisoPopup.lastItem.tag = 8;
-    [self.anisoPopup addItemWithTitle:@"4x"]; self.anisoPopup.lastItem.tag = 4;
-    [self.anisoPopup addItemWithTitle:@"2x"]; self.anisoPopup.lastItem.tag = 2;
-    [self.anisoPopup addItemWithTitle:@"Off"]; self.anisoPopup.lastItem.tag = 0;
+    mkLabel(@"Anisotropic Filtering:", 343);
+    self.anisoPopup = mkPopup(341);
+    [self.anisoPopup addItemWithTitle:@"15 Samples (Max)"]; self.anisoPopup.lastItem.tag = 15;
+    [self.anisoPopup addItemWithTitle:@"8 Samples"]; self.anisoPopup.lastItem.tag = 8;
+    [self.anisoPopup addItemWithTitle:@"4 Samples"]; self.anisoPopup.lastItem.tag = 4;
+    [self.anisoPopup addItemWithTitle:@"2 Samples"]; self.anisoPopup.lastItem.tag = 2;
+    [self.anisoPopup addItemWithTitle:@"Off (best performance)"]; self.anisoPopup.lastItem.tag = 0;
     if (![self.anisoPopup selectItemWithTag:opts.anisotropy]) [self.anisoPopup selectItemWithTag:15];
 
-    mkLabel(@"Shadow Quality:", 350);
-    self.shadowPopup = mkPopup(348);
-    [self.shadowPopup addItemWithTitle:@"Ultra (1024)"]; self.shadowPopup.lastItem.tag = 3;
-    [self.shadowPopup addItemWithTitle:@"High (512)"]; self.shadowPopup.lastItem.tag = 2;
-    [self.shadowPopup addItemWithTitle:@"Medium (256)"]; self.shadowPopup.lastItem.tag = 1;
-    [self.shadowPopup addItemWithTitle:@"Off"]; self.shadowPopup.lastItem.tag = 0;
-    [self.shadowPopup selectItemWithTag:opts.shadowQuality];
-
-    mkLabel(@"Water Detail:", 319);
-    self.waterPopup = mkPopup(317);
-    [self.waterPopup addItemWithTitle:@"Ultra (1024 Reflections)"]; self.waterPopup.lastItem.tag = 3;
-    [self.waterPopup addItemWithTitle:@"High (512 Reflections)"]; self.waterPopup.lastItem.tag = 2;
-    [self.waterPopup addItemWithTitle:@"Medium (512 Reflections)"]; self.waterPopup.lastItem.tag = 1;
-    [self.waterPopup addItemWithTitle:@"Low (Off)"]; self.waterPopup.lastItem.tag = 0;
-    [self.waterPopup selectItemWithTag:opts.waterQuality];
-
-    mkLabel(@"Screen Effects:", 288);
-    self.effectsPopup = mkPopup(286);
-    [self.effectsPopup addItemWithTitle:@"HDR + Depth of Field"]; self.effectsPopup.lastItem.tag = 3;
-    [self.effectsPopup addItemWithTitle:@"HDR Only"]; self.effectsPopup.lastItem.tag = 2;
+    mkLabel(@"Screen Effects:", 312);
+    self.effectsPopup = mkPopup(310);
+    [self.effectsPopup addItemWithTitle:@"HDR"]; self.effectsPopup.lastItem.tag = 2;
     [self.effectsPopup addItemWithTitle:@"Bloom"]; self.effectsPopup.lastItem.tag = 1;
-    [self.effectsPopup addItemWithTitle:@"Off"]; self.effectsPopup.lastItem.tag = 0;
+    [self.effectsPopup addItemWithTitle:@"None"]; self.effectsPopup.lastItem.tag = 0;
     [self.effectsPopup selectItemWithTag:opts.screenEffects];
 
-    mkLabel(@"Display Mode:", 257);
-    self.displayPopup = mkPopup(255);
+    mkLabel(@"Display Mode:", 281);
+    self.displayPopup = mkPopup(279);
     [self.displayPopup addItemWithTitle:@"Fullscreen"]; self.displayPopup.lastItem.tag = 1;
     [self.displayPopup addItemWithTitle:@"Windowed"]; self.displayPopup.lastItem.tag = 0;
     [self.displayPopup selectItemWithTag:opts.fullscreen ? 1 : 0];
+
+    self.vsyncCheck = [NSButton checkboxWithTitle:@"Vertical Sync" target:nil action:nil];
+    self.vsyncCheck.frame = NSMakeRect(196, 255, 160, 18);
+    self.vsyncCheck.state = opts.vsync ? NSControlStateValueOn : NSControlStateValueOff;
+    [cv addSubview:self.vsyncCheck];
 
     mkLabel(@"FOV Preset:", 226);
     self.fovPresetPopup = mkPopup(224);
@@ -617,12 +1268,20 @@ static void saveFalloutOptions(FalloutOptions opts) {
     sep2.boxType = NSBoxSeparator;
     [cv addSubview:sep2];
 
+    self.advancedBtn = [NSButton buttonWithTitle:@"Advanced..." target:self action:@selector(advancedClicked:)];
+    self.advancedBtn.frame = NSMakeRect(24, 16, 96, 30);
+    [cv addSubview:self.advancedBtn];
+
+    NSButton *exploreBtn = [NSButton buttonWithTitle:@"Explore Game Data" target:self action:@selector(exploreGameDataClicked:)];
+    exploreBtn.frame = NSMakeRect(126, 16, 144, 30);
+    [cv addSubview:exploreBtn];
+
     NSButton *quitBtn = [NSButton buttonWithTitle:@"Quit" target:self action:@selector(quitClicked:)];
-    quitBtn.frame = NSMakeRect(276, 16, 88, 30);
+    quitBtn.frame = NSMakeRect(294, 16, 76, 30);
     [cv addSubview:quitBtn];
 
     NSButton *playBtn = [NSButton buttonWithTitle:@"Play" target:self action:@selector(playClicked:)];
-    playBtn.frame = NSMakeRect(372, 16, 84, 30);
+    playBtn.frame = NSMakeRect(378, 16, 78, 30);
     playBtn.keyEquivalent = @"\r";
     [cv addSubview:playBtn];
 
@@ -725,7 +1384,9 @@ static void saveFalloutOptions(FalloutOptions opts) {
         @"isize w": @[@"iSize W", @(fnv_display_width())],
         @"isize h": @[@"iSize H", @(fnv_display_height())],
         @"bfull screen": @[@"bFull Screen", @1],
+        @"ipresentinterval": @[@"iPresentInterval", opts.vsync ? @1 : @0],
         @"sd3ddevice": @[@"sD3DDevice", @(fnv_display_adapter_description())],
+        // Metal backend uses post-process SMAA/FXAA rather than hardware D3D9 MSAA
         @"imultisample": @[@"iMultiSample", @0],
         @"iwatermultisamples": @[@"iWaterMultisamples", @0],
         @"btransparencymultisampling": @[@"bTransparencyMultisampling", @0],
@@ -742,189 +1403,72 @@ static void saveFalloutOptions(FalloutOptions opts) {
     } mutableCopy];
 
     if (opts.preset > 0) {
-        // Base draw distances / LOD / terrain / grass / decals matching Bethesda's official presets.
-        if (opts.preset == 1) { // Low
-            displaySettings[@"imaxdecalsperframe"] = @[@"iMaxDecalsPerFrame", @2];
-            displaySettings[@"fspecularlodstartfade"] = @[@"fSpecularLODStartFade", @"200.0000"];
-            displaySettings[@"fshadowlodstartfade"] = @[@"fShadowLODStartFade", @"100.0000"];
-            displaySettings[@"flightlodstartfade"] = @[@"fLightLODStartFade", @"200.0000"];
-            allSettings[@"lod"] = @{
-                @"flodfadeoutmultactors":  @[@"fLODFadeOutMultActors",  @"2.0000"],
-                @"flodfadeoutmultobjects": @[@"fLODFadeOutMultObjects", @"2.5000"],
-                @"flodfadeoutmultitems":   @[@"fLODFadeOutMultItems",   @"1.0000"],
-            };
-            allSettings[@"terrainmanager"] = @{
-                @"ftreeloaddistance":         @[@"fTreeLoadDistance",         @"0.0000"],
-                @"fblockloaddistancelow":     @[@"fBlockLoadDistanceLow",     @"25000.0000"],
-                @"fblockloaddistance":        @[@"fBlockLoadDistance",        @"125000.0000"],
-                @"fsplitdistancemult":        @[@"fSplitDistanceMult",        @"0.7500"],
-                @"fhighblockloaddistancelow": @[@"fHighBlockLoadDistanceLow", @"20000.0000"],
-            };
-            allSettings[@"grass"] = @{
-                @"b30grassvs":              @[@"b30GrassVS",              @0],
-                @"fgrassstartfadedistance": @[@"fGrassStartFadeDistance", @"0.0000"],
-            };
-        } else if (opts.preset == 2) { // Medium
-            displaySettings[@"imaxdecalsperframe"] = @[@"iMaxDecalsPerFrame", @5];
-            displaySettings[@"fspecularlodstartfade"] = @[@"fSpecularLODStartFade", @"500.0000"];
-            displaySettings[@"fshadowlodstartfade"] = @[@"fShadowLODStartFade", @"200.0000"];
-            displaySettings[@"flightlodstartfade"] = @[@"fLightLODStartFade", @"1000.0000"];
-            allSettings[@"lod"] = @{
-                @"flodfadeoutmultactors":  @[@"fLODFadeOutMultActors",  @"2.5000"],
-                @"flodfadeoutmultobjects": @[@"fLODFadeOutMultObjects", @"2.5000"],
-                @"flodfadeoutmultitems":   @[@"fLODFadeOutMultItems",   @"3.5000"],
-            };
-            allSettings[@"terrainmanager"] = @{
-                @"ftreeloaddistance":         @[@"fTreeLoadDistance",         @"25000.0000"],
-                @"fblockloaddistancelow":     @[@"fBlockLoadDistanceLow",     @"50000.0000"],
-                @"fblockloaddistance":        @[@"fBlockLoadDistance",        @"125000.0000"],
-                @"fsplitdistancemult":        @[@"fSplitDistanceMult",        @"1.0000"],
-                @"fhighblockloaddistancelow": @[@"fHighBlockLoadDistanceLow", @"20000.0000"],
-            };
-            allSettings[@"grass"] = @{
-                @"b30grassvs":              @[@"b30GrassVS",              @0],
-                @"fgrassstartfadedistance": @[@"fGrassStartFadeDistance", @"3000.0000"],
-            };
-        } else if (opts.preset == 3) { // High
-            displaySettings[@"imaxdecalsperframe"] = @[@"iMaxDecalsPerFrame", @10];
-            displaySettings[@"fspecularlodstartfade"] = @[@"fSpecularLODStartFade", @"1000.0000"];
-            displaySettings[@"fshadowlodstartfade"] = @[@"fShadowLODStartFade", @"460.0000"];
-            displaySettings[@"flightlodstartfade"] = @[@"fLightLODStartFade", @"2500.0000"];
-            allSettings[@"lod"] = @{
-                @"flodfadeoutmultactors":  @[@"fLODFadeOutMultActors",  @"6.0000"],
-                @"flodfadeoutmultobjects": @[@"fLODFadeOutMultObjects", @"7.5000"],
-                @"flodfadeoutmultitems":   @[@"fLODFadeOutMultItems",   @"4.5000"],
-            };
-            allSettings[@"terrainmanager"] = @{
-                @"ftreeloaddistance":         @[@"fTreeLoadDistance",         @"26000.0000"],
-                @"fblockloaddistancelow":     @[@"fBlockLoadDistanceLow",     @"50000.0000"],
-                @"fblockloaddistance":        @[@"fBlockLoadDistance",        @"125000.0000"],
-                @"fsplitdistancemult":        @[@"fSplitDistanceMult",        @"1.0000"],
-                @"fhighblockloaddistancelow": @[@"fHighBlockLoadDistanceLow", @"20000.0000"],
-            };
-            allSettings[@"grass"] = @{
-                @"b30grassvs":              @[@"b30GrassVS",              @1],
-                @"fgrassstartfadedistance": @[@"fGrassStartFadeDistance", @"5000.0000"],
-            };
-        } else { // Ultra (4)
-            displaySettings[@"imaxdecalsperframe"] = @[@"iMaxDecalsPerFrame", @10];
-            displaySettings[@"fspecularlodstartfade"] = @[@"fSpecularLODStartFade", @"2000.0000"];
-            displaySettings[@"fshadowlodstartfade"] = @[@"fShadowLODStartFade", @"1000.0000"];
-            displaySettings[@"flightlodstartfade"] = @[@"fLightLODStartFade", @"3500.0000"];
-            allSettings[@"lod"] = @{
-                @"flodfadeoutmultactors":  @[@"fLODFadeOutMultActors",  @"15.0000"],
-                @"flodfadeoutmultobjects": @[@"fLODFadeOutMultObjects", @"15.0000"],
-                @"flodfadeoutmultitems":   @[@"fLODFadeOutMultItems",   @"15.0000"],
-            };
-            allSettings[@"terrainmanager"] = @{
-                @"ftreeloaddistance":         @[@"fTreeLoadDistance",         @"40000.0000"],
-                @"fblockloaddistancelow":     @[@"fBlockLoadDistanceLow",     @"50000.0000"],
-                @"fblockloaddistance":        @[@"fBlockLoadDistance",        @"125000.0000"],
-                @"fsplitdistancemult":        @[@"fSplitDistanceMult",        @"1.5000"],
-                @"fhighblockloaddistancelow": @[@"fHighBlockLoadDistanceLow", @"20000.0000"],
-            };
-            allSettings[@"grass"] = @{
-                @"b30grassvs":              @[@"b30GrassVS",              @1],
-                @"fgrassstartfadedistance": @[@"fGrassStartFadeDistance", @"7000.0000"],
-            };
-        }
-
-        // Individual detail settings (either preset defaults or user overrides)
+        // Detail
         displaySettings[@"itexmipmapskip"] = @[@"iTexMipMapSkip", @(opts.textureSize)];
         displaySettings[@"itexmipmapminimum"] = @[@"iTexMipMapMinimum", @4];
         displaySettings[@"imaxanisotropy"] = @[@"iMaxAnisotropy", @(opts.anisotropy)];
+        displaySettings[@"imaxdecalsperframe"] = @[@"iMaxDecalsPerFrame", @(opts.decalCap)];
         displaySettings[@"fdecallod1"] = @[@"fDecalLOD1", @"500.0000"];
         displaySettings[@"fdecallod2"] = @[@"fDecalLOD2", @"1000.0000"];
 
-        if (opts.shadowQuality == 0) {
-            displaySettings[@"bdrawshadows"] = @[@"bDrawShadows", @0];
-            displaySettings[@"ishadowfilter"] = @[@"iShadowFilter", @0];
-            displaySettings[@"ishadowmapresolution"] = @[@"iShadowMapResolution", @256];
-            displaySettings[@"iactorshadowcountint"] = @[@"iActorShadowCountInt", @0];
-            displaySettings[@"iactorshadowcountext"] = @[@"iActorShadowCountExt", @0];
-        } else if (opts.shadowQuality == 1) {
-            displaySettings[@"bdrawshadows"] = @[@"bDrawShadows", @1];
-            displaySettings[@"ishadowfilter"] = @[@"iShadowFilter", @1];
-            displaySettings[@"ishadowmapresolution"] = @[@"iShadowMapResolution", @256];
-            displaySettings[@"iactorshadowcountint"] = @[@"iActorShadowCountInt", @4];
-            displaySettings[@"iactorshadowcountext"] = @[@"iActorShadowCountExt", @2];
-        } else if (opts.shadowQuality == 2) {
-            displaySettings[@"bdrawshadows"] = @[@"bDrawShadows", @1];
-            displaySettings[@"ishadowfilter"] = @[@"iShadowFilter", @2];
-            displaySettings[@"ishadowmapresolution"] = @[@"iShadowMapResolution", @512];
-            displaySettings[@"iactorshadowcountint"] = @[@"iActorShadowCountInt", @4];
-            displaySettings[@"iactorshadowcountext"] = @[@"iActorShadowCountExt", @2];
-        } else {
-            displaySettings[@"bdrawshadows"] = @[@"bDrawShadows", @1];
-            displaySettings[@"ishadowfilter"] = @[@"iShadowFilter", @2];
-            displaySettings[@"ishadowmapresolution"] = @[@"iShadowMapResolution", @1024];
-            displaySettings[@"iactorshadowcountint"] = @[@"iActorShadowCountInt", @6];
-            displaySettings[@"iactorshadowcountext"] = @[@"iActorShadowCountExt", @6];
-        }
+        // View Distance
+        displaySettings[@"fspecularlodstartfade"] = @[@"fSpecularLODStartFade", [NSString stringWithFormat:@"%.4f", (double)opts.specularityFade * 100.0]];
+        displaySettings[@"fshadowlodstartfade"]   = @[@"fShadowLODStartFade",   [NSString stringWithFormat:@"%.4f", (double)opts.shadowFade * 100.0]];
+        displaySettings[@"flightlodstartfade"]    = @[@"fLightLODStartFade",    [NSString stringWithFormat:@"%.4f", (double)opts.lightFade * 100.0]];
+        allSettings[@"lod"] = @{
+            @"flodfadeoutmultobjects": @[@"fLODFadeOutMultObjects", [NSString stringWithFormat:@"%.4f", (double)opts.objectFade]],
+            @"flodfadeoutmultactors":  @[@"fLODFadeOutMultActors",  [NSString stringWithFormat:@"%.4f", (double)opts.actorFade]],
+            @"flodfadeoutmultitems":   @[@"fLODFadeOutMultItems",   [NSString stringWithFormat:@"%.4f", (double)opts.itemFade]],
+        };
+        allSettings[@"grass"] = @{
+            @"b30grassvs":              @[@"b30GrassVS",              (opts.preset >= 3) ? @1 : @0],
+            @"fgrassstartfadedistance": @[@"fGrassStartFadeDistance", [NSString stringWithFormat:@"%.4f", (double)opts.grassFade * 1000.0]],
+        };
 
-        if (opts.waterQuality == 0) {
-            allSettings[@"water"] = @{
-                @"busewaterrefractions":           @[@"bUseWaterRefractions",           @0],
-                @"busewaterreflections":           @[@"bUseWaterReflections",           @0],
-                @"busewaterreflectionblur":        @[@"bUseWaterReflectionBlur",        @0],
-                @"busewaterdisplacements":         @[@"bUseWaterDisplacements",         @0],
-                @"busewaterdepth":                 @[@"bUseWaterDepth",                 @0],
-                @"iwaterreflectwidth":             @[@"iWaterReflectWidth",             @256],
-                @"iwaterreflectheight":            @[@"iWaterReflectHeight",            @256],
-                @"iwaterbluramount":               @[@"iWaterBlurAmount",               @0],
-                @"bautowatersilhouettereflections":@[@"bAutoWaterSilhouetteReflections",@1],
-                @"bforcehighdetailreflections":    @[@"bForceHighDetailReflections",    @0],
-            };
-        } else if (opts.waterQuality == 1) {
-            allSettings[@"water"] = @{
-                @"busewaterrefractions":           @[@"bUseWaterRefractions",           @1],
-                @"busewaterreflections":           @[@"bUseWaterReflections",           @1],
-                @"busewaterreflectionblur":        @[@"bUseWaterReflectionBlur",        @0],
-                @"busewaterdisplacements":         @[@"bUseWaterDisplacements",         @1],
-                @"busewaterdepth":                 @[@"bUseWaterDepth",                 @1],
-                @"iwaterreflectwidth":             @[@"iWaterReflectWidth",             @512],
-                @"iwaterreflectheight":            @[@"iWaterReflectHeight",            @512],
-                @"iwaterbluramount":               @[@"iWaterBlurAmount",               @0],
-                @"bautowatersilhouettereflections":@[@"bAutoWaterSilhouetteReflections",@1],
-                @"bforcehighdetailreflections":    @[@"bForceHighDetailReflections",    @0],
-            };
-        } else if (opts.waterQuality == 2) {
-            allSettings[@"water"] = @{
-                @"busewaterrefractions":           @[@"bUseWaterRefractions",           @1],
-                @"busewaterreflections":           @[@"bUseWaterReflections",           @1],
-                @"busewaterreflectionblur":        @[@"bUseWaterReflectionBlur",        @1],
-                @"busewaterdisplacements":         @[@"bUseWaterDisplacements",         @1],
-                @"busewaterdepth":                 @[@"bUseWaterDepth",                 @1],
-                @"iwaterreflectwidth":             @[@"iWaterReflectWidth",             @512],
-                @"iwaterreflectheight":            @[@"iWaterReflectHeight",            @512],
-                @"iwaterbluramount":               @[@"iWaterBlurAmount",               @2],
-                @"bautowatersilhouettereflections":@[@"bAutoWaterSilhouetteReflections",@1],
-                @"bforcehighdetailreflections":    @[@"bForceHighDetailReflections",    @0],
-            };
-        } else {
-            allSettings[@"water"] = @{
-                @"busewaterrefractions":           @[@"bUseWaterRefractions",           @1],
-                @"busewaterreflections":           @[@"bUseWaterReflections",           @1],
-                @"busewaterreflectionblur":        @[@"bUseWaterReflectionBlur",        @1],
-                @"busewaterdisplacements":         @[@"bUseWaterDisplacements",         @1],
-                @"busewaterdepth":                 @[@"bUseWaterDepth",                 @1],
-                @"iwaterreflectwidth":             @[@"iWaterReflectWidth",             @1024],
-                @"iwaterreflectheight":            @[@"iWaterReflectHeight",            @1024],
-                @"iwaterbluramount":               @[@"iWaterBlurAmount",               @4],
-                @"bautowatersilhouettereflections":@[@"bAutoWaterSilhouetteReflections",@0],
-                @"bforcehighdetailreflections":    @[@"bForceHighDetailReflections",    @1],
-            };
-        }
+        // Distant LOD
+        allSettings[@"terrainmanager"] = @{
+            @"ftreeloaddistance":         @[@"fTreeLoadDistance",         [NSString stringWithFormat:@"%.4f", (double)opts.treeLodFade * 1000.0]],
+            @"fblockloaddistancelow":     @[@"fBlockLoadDistanceLow",     [NSString stringWithFormat:@"%.4f", (double)opts.objectLodFade * 1000.0]],
+            @"fblockloaddistance":        @[@"fBlockLoadDistance",        @"125000.0000"],
+            @"fsplitdistancemult":        @[@"fSplitDistanceMult",        [NSString stringWithFormat:@"%.4f", (double)opts.landQuality / 100.0]],
+            @"fhighblockloaddistancelow": @[@"fHighBlockLoadDistanceLow", @"20000.0000"],
+        };
 
+        // Shadows
+        int shadowRes = (opts.shadowQuality == 2) ? 1024 : ((opts.shadowQuality == 1) ? 512 : 256);
+        displaySettings[@"bdrawshadows"]         = @[@"bDrawShadows",         opts.enableShadows ? @1 : @0];
+        displaySettings[@"ishadowmapresolution"] = @[@"iShadowMapResolution", @(shadowRes)];
+        displaySettings[@"ishadowfilter"]        = @[@"iShadowFilter",        opts.enableShadows ? @(opts.shadowFiltering) : @0];
+        displaySettings[@"iactorshadowcountint"] = @[@"iActorShadowCountInt", opts.enableShadows ? @(opts.maxInteriorShadows) : @0];
+        displaySettings[@"iactorshadowcountext"] = @[@"iActorShadowCountExt", opts.enableShadows ? @(opts.maxExteriorShadows) : @0];
+
+        // Water
+        int waterRes = (opts.waterReflectionQuality == 2) ? 1024 : ((opts.waterReflectionQuality == 1) ? 512 : 256);
+        int waterBlur = (opts.waterReflections && opts.waterSoftReflections)
+            ? ((opts.waterReflectionQuality >= 2) ? 4 : 2) : 0;
+        allSettings[@"water"] = @{
+            @"busewaterrefractions":            @[@"bUseWaterRefractions",            opts.waterRefractions ? @1 : @0],
+            @"busewaterreflections":            @[@"bUseWaterReflections",            opts.waterReflections ? @1 : @0],
+            @"busewaterreflectionblur":         @[@"bUseWaterReflectionBlur",         (opts.waterReflections && opts.waterSoftReflections) ? @1 : @0],
+            @"busewaterdisplacements":          @[@"bUseWaterDisplacements",          opts.waterDisplacement ? @1 : @0],
+            @"busewaterdepth":                  @[@"bUseWaterDepth",                  opts.waterDepthFog ? @1 : @0],
+            @"iwaterreflectwidth":              @[@"iWaterReflectWidth",              @(waterRes)],
+            @"iwaterreflectheight":             @[@"iWaterReflectHeight",             @(waterRes)],
+            @"iwaterbluramount":                @[@"iWaterBlurAmount",                @(waterBlur)],
+            @"bautowatersilhouettereflections": @[@"bAutoWaterSilhouetteReflections", (opts.waterReflections && opts.waterFullSceneReflections) ? @0 : @1],
+            @"bforcehighdetailreflections":     @[@"bForceHighDetailReflections",     (opts.waterReflections && opts.waterFullDetailReflections) ? @1 : @0],
+        };
+
+        // Screen Effects & Imagespace
         allSettings[@"blurshaderhdr"] = @{
-            @"bdohighdynamicrange": @[@"bDoHighDynamicRange", (opts.screenEffects >= 2) ? @1 : @0],
+            @"bdohighdynamicrange": @[@"bDoHighDynamicRange", (opts.screenEffects == 2) ? @1 : @0],
         };
         allSettings[@"blurshader"] = @{
             @"buseblurshader": @[@"bUseBlurShader", (opts.screenEffects == 1) ? @1 : @0],
         };
         allSettings[@"imagespace"] = @{
-            @"bdodepthoffield":  @[@"bDoDepthOfField",  (opts.screenEffects == 3) ? @1 : @0],
-            @"iradialblurlevel": @[@"iRadialBlurLevel", (opts.preset >= 4) ? @2 : ((opts.preset == 3) ? @1 : @0)],
+            @"bdodepthoffield":  @[@"bDoDepthOfField",  opts.depthOfField ? @1 : @0],
+            @"iradialblurlevel": @[@"iRadialBlurLevel", @(opts.radialBlurQuality)],
         };
     }
 
@@ -981,12 +1525,14 @@ static void saveFalloutOptions(FalloutOptions opts) {
     NSError *prefsError = nil;
     BOOL prefsOK = [[lines componentsJoinedByString:@"\n"] writeToFile:prefs atomically:YES encoding:NSISOLatin1StringEncoding error:&prefsError];
     NSString *fovLog = (opts.fovPreset == 0) ? @"keep" : [NSString stringWithFormat:@"%d/%d", opts.worldFov, opts.firstPersonFov];
-    fprintf(stderr, "[display] render %ux%u -> output %ux%u (scale=%u%% upscaler=%s aa=%s); preset=%d tex=%d aniso=%d shadow=%d water=%d fx=%d fov=%s mouse_accel=%d; user=%s; preferences=%s\n",
+    fprintf(stderr, "[display] render %ux%u -> output %ux%u (scale=%u%% upscaler=%s aa=%s); preset=%d tex=%d aniso=%d shadows=%d/%d waterRefl=%d/%d fx=%d dof=%d fov=%s mouse_accel=%d; user=%s; preferences=%s\n",
             fnv_display_width(), fnv_display_height(), outW, outH,
             opts.renderScale, opts.upscaler == 1 ? "metalfx" : "bilinear",
             opts.antiAliasing == 1 ? "smaa" : (opts.antiAliasing == 2 ? "fxaa" : "off"),
             opts.preset, opts.textureSize, opts.anisotropy,
-            opts.shadowQuality, opts.waterQuality, opts.screenEffects, fovLog.UTF8String,
+            opts.enableShadows ? 1 : 0, opts.shadowQuality,
+            opts.waterReflections ? 1 : 0, opts.waterReflectionQuality,
+            opts.screenEffects, opts.depthOfField ? 1 : 0, fovLog.UTF8String,
             opts.disableMouseAccel ? 0 : 1,
             userDir.fileSystemRepresentation,
             prefsOK ? "written" : prefsError.localizedDescription.UTF8String);
