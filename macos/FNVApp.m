@@ -315,6 +315,8 @@ static NSString *exeHash(NSURL *url) {
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate> {
     double _mouseAccumX;
     double _mouseAccumY;
+    NSPoint _capturedAnchor;
+    BOOL _hasCapturedAnchor;
 }
 @property (nonatomic, strong) NSWindow *window;
 @property (nonatomic, strong) FNVMetalView *metalView;
@@ -376,15 +378,33 @@ static NSString *exeHash(NSURL *url) {
     NSApp.mainMenu = bar;
 }
 
+- (BOOL)shouldCaptureCursor {
+    return self.window != nil && self.window.isKeyWindow && NSApp.isActive && !self.window.isMiniaturized;
+}
+
+- (void)warpCursorToWindowCenter {
+    if (!self.window) return;
+    NSRect wf = self.window.frame;
+    NSPoint centerAppKit = NSMakePoint(NSMidX(wf), NSMidY(wf));
+    CGFloat primaryH = CGDisplayBounds(CGMainDisplayID()).size.height;
+    CGPoint centerCG = CGPointMake(centerAppKit.x, primaryH - centerAppKit.y);
+    CGWarpMouseCursorPosition(centerCG);
+    _capturedAnchor = NSEvent.mouseLocation;
+    _hasCapturedAnchor = YES;
+}
+
 - (void)setCursorCapture:(BOOL)capture {
     if (_cursorCaptured == capture) return;
     _cursorCaptured = capture;
     _mouseAccumX = 0.0;
     _mouseAccumY = 0.0;
-    CGAssociateMouseAndMouseCursorPosition(!capture);
     if (capture) {
+        [self warpCursorToWindowCenter];
+        CGAssociateMouseAndMouseCursorPosition(false);
         [NSCursor hide];
     } else {
+        _hasCapturedAnchor = NO;
+        CGAssociateMouseAndMouseCursorPosition(true);
         [NSCursor unhide];
     }
 }
@@ -419,7 +439,23 @@ static NSString *exeHash(NSURL *url) {
     case NSEventTypeLeftMouseDragged:
     case NSEventTypeRightMouseDragged:
     case NSEventTypeOtherMouseDragged:
+        if (!_cursorCaptured && [self shouldCaptureCursor]) {
+            // Re-capture automatically if a transient system overlay/notification dismissed
+            // without re-firing windowDidBecomeKey (in windowed mode, only inside the game view).
+            if (self.gameContainer.fullscreenMode ||
+                (self.metalView && NSPointInRect(e.locationInWindow, self.metalView.frame))) {
+                [self setCursorCapture:YES];
+            }
+        }
         if (_cursorCaptured) {
+            // Self-heal if macOS WindowServer silently broke cursor dissociation (e.g. notification banner).
+            if (_hasCapturedAnchor && [self shouldCaptureCursor]) {
+                NSPoint cur = NSEvent.mouseLocation;
+                if (fabs(cur.x - _capturedAnchor.x) > 4.0 || fabs(cur.y - _capturedAnchor.y) > 4.0) {
+                    [self warpCursorToWindowCenter];
+                    CGAssociateMouseAndMouseCursorPosition(false);
+                }
+            }
             _mouseAccumX += (double)e.deltaX;
             _mouseAccumY += (double)e.deltaY;
             int dx = (int)trunc(_mouseAccumX);
@@ -825,6 +861,14 @@ static NSString *exeHash(NSURL *url) {
 - (void)windowDidEnterFullScreen:(NSNotification *)notification {
     (void)notification;
     self.gameContainer.fullscreenMode = YES;
+    if ([self shouldCaptureCursor]) {
+        if (_cursorCaptured) {
+            [self warpCursorToWindowCenter];
+            CGAssociateMouseAndMouseCursorPosition(false);
+        } else {
+            [self setCursorCapture:YES];
+        }
+    }
 }
 
 - (void)windowDidExitFullScreen:(NSNotification *)notification {
@@ -849,6 +893,11 @@ static NSString *exeHash(NSURL *url) {
     fnv_media_active(1);
 #endif
     setActive(YES);
+}
+
+- (void)windowDidBecomeMain:(NSNotification *)notification {
+    if (notification.object != self.window) return;
+    if ([self shouldCaptureCursor]) [self setCursorCapture:YES];
 }
 
 - (void)windowDidResignKey:(NSNotification *)notification {
