@@ -317,6 +317,9 @@ static NSString *exeHash(NSURL *url) {
     double _mouseAccumY;
     NSPoint _capturedAnchor;
     BOOL _hasCapturedAnchor;
+    BOOL _swallowNextLeftMouseUp;
+    BOOL _suppressActivationClick;
+    CFTimeInterval _activationTime;
 }
 @property (nonatomic, strong) NSWindow *window;
 @property (nonatomic, strong) FNVMetalView *metalView;
@@ -468,10 +471,27 @@ static NSString *exeHash(NSURL *url) {
         }
         return;
     case NSEventTypeLeftMouseDown:
-        if (!_cursorCaptured && self.window.isKeyWindow) [self setCursorCapture:YES];
+        if (!_cursorCaptured) {
+            if (self.window.isKeyWindow || (NSApp.isActive && self.gameContainer.fullscreenMode)) {
+                [self setCursorCapture:YES];
+                _swallowNextLeftMouseUp = YES;
+            }
+            return;
+        }
+        if (_suppressActivationClick) {
+            _suppressActivationClick = NO;
+            if (CACurrentMediaTime() - _activationTime < 0.08) {
+                _swallowNextLeftMouseUp = YES;
+                return;
+            }
+        }
         input_mouse_button(0, 1);
         return;
     case NSEventTypeLeftMouseUp:
+        if (_swallowNextLeftMouseUp) {
+            _swallowNextLeftMouseUp = NO;
+            return;
+        }
         input_mouse_button(0, 0);
         return;
     case NSEventTypeRightMouseDown:
@@ -561,6 +581,7 @@ static NSString *exeHash(NSURL *url) {
     self.window.delegate = self;
     self.window.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
     self.window.backgroundColor = NSColor.blackColor;
+    self.window.acceptsMouseMovedEvents = YES;
     mainWindow = self.window;
 
     self.gameContainer = [[FNVGameView alloc] initWithFrame:winRect];
@@ -609,20 +630,30 @@ static NSString *exeHash(NSURL *url) {
         handler:^NSEvent *(NSEvent *event) {
             AppDelegate *strongSelf = weakSelf;
             if (!strongSelf) return event;
-            if (event.window == strongSelf.window || event.type == NSEventTypeFlagsChanged) {
-                if (strongSelf.window.isKeyWindow) {
-                    // Let macOS Metal Performance HUD shortcuts (Shift+Fn+F9 / Shift+Fn+F7)
-                    // pass through to the system instead of swallowing them or triggering F9.
-                    if ((event.type == NSEventTypeKeyDown || event.type == NSEventTypeKeyUp) &&
-                        (event.modifierFlags & NSEventModifierFlagShift) &&
-                        (event.keyCode == 0x65 || event.keyCode == 0x62)) {
-                        return event;
-                    }
-                    [strongSelf handleEvent:event];
-                    if ((event.type == NSEventTypeKeyDown || event.type == NSEventTypeKeyUp) &&
-                        !(event.modifierFlags & NSEventModifierFlagCommand)) {
-                        return nil; // suppress system beep for game keys
-                    }
+            BOOL isMouseMove = (event.type == NSEventTypeMouseMoved ||
+                                event.type == NSEventTypeLeftMouseDragged ||
+                                event.type == NSEventTypeRightMouseDragged ||
+                                event.type == NSEventTypeOtherMouseDragged);
+            BOOL matchesWindow = (event.window == strongSelf.window ||
+                                  event.type == NSEventTypeFlagsChanged ||
+                                  (isMouseMove && event.window == nil));
+            BOOL windowActive = strongSelf.window.isKeyWindow ||
+                                (NSApp.isActive && strongSelf.gameContainer.fullscreenMode);
+            if (matchesWindow && windowActive) {
+                if (!strongSelf.window.isKeyWindow && NSApp.isActive && strongSelf.gameContainer.fullscreenMode) {
+                    [strongSelf.window makeKeyWindow];
+                }
+                // Let macOS Metal Performance HUD shortcuts (Shift+Fn+F9 / Shift+Fn+F7)
+                // pass through to the system instead of swallowing them or triggering F9.
+                if ((event.type == NSEventTypeKeyDown || event.type == NSEventTypeKeyUp) &&
+                    (event.modifierFlags & NSEventModifierFlagShift) &&
+                    (event.keyCode == 0x65 || event.keyCode == 0x62)) {
+                    return event;
+                }
+                [strongSelf handleEvent:event];
+                if ((event.type == NSEventTypeKeyDown || event.type == NSEventTypeKeyUp) &&
+                    !(event.modifierFlags & NSEventModifierFlagCommand)) {
+                    return nil; // suppress system beep for game keys
                 }
             }
             return event;
@@ -888,6 +919,10 @@ static NSString *exeHash(NSURL *url) {
 
 - (void)windowDidBecomeKey:(NSNotification *)notification {
     if (notification.object != self.window) return;
+    if (!_cursorCaptured) {
+        _suppressActivationClick = YES;
+        _activationTime = CACurrentMediaTime();
+    }
     [self setCursorCapture:YES];
 #ifndef FNV_PROBE
     fnv_media_active(1);
@@ -902,6 +937,10 @@ static NSString *exeHash(NSURL *url) {
 
 - (void)windowDidResignKey:(NSNotification *)notification {
     if (notification.object != self.window) return;
+    // In fullscreen, transient system banners (Game Mode, Notification Center) can briefly
+    // resign key status while NSApp is still active; keep cursor capture intact unless the
+    // user actually switched away (which fires applicationWillResignActive:).
+    if (NSApp.isActive && self.gameContainer.fullscreenMode) return;
     [self setCursorCapture:NO];
     [self releaseAllInputs];
 }
