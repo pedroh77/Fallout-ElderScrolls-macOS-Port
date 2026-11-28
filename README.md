@@ -236,7 +236,7 @@ Additional flags:
 
 Holding `Option` on launch (or leaving "Skip launcher" unchecked) opens the native macOS Options dialog before starting the game. The runtime detects the **physical panel pixel size** (e.g. `2560×1600` on a MacBook Air M1) rather than macOS's scaled backing resolution to avoid wasted fillrate.
 
-On MacBooks with a camera housing (notch), the app opts out of macOS's compatibility mode, so native fullscreen is not letterboxed below the housing. Fallout's HUD sits at the bottom, so it keeps the whole panel; Skyrim's compass is top-center, so Skyrim instead renders a shorter frame at full width and leaves the housing strip black. Set `FNV_NOTCH_SAFE=0` or `1` to override that per-game choice; `FNV_NOTCH_SIM_PX` simulates a housing height on Macs without a notch.
+On MacBooks with a camera housing (notch), the app opts out of macOS's compatibility mode so native fullscreen stays full width without macOS letterboxing. Because macOS native fullscreen still confines the window below `safeAreaInsets.top`, the runtime adjusts the output height proportionally to the below-notch screen area for all games, eliminating left/right pillarbox bars at any display scaling (including scaled modes such as "More Space") while keeping the top housing strip black and clear of HUD elements like Skyrim's compass. Set `FNV_NOTCH_SAFE=0` to disable that adjustment or `FNV_NOTCH_SIM_PX` to simulate a housing height on Macs without a notch.
 
 ### Fallout 3 & Fallout: New Vegas (`OptionsFallout.m`)
 

@@ -245,21 +245,16 @@ static void detectPhysicalDisplayPixels(NSScreen *screen,
     if (outBackingH) *outBackingH = backH;
 }
 
-#ifndef FNV_PROBE
-// The camera housing (notch) covers a strip at the top of the built-in display. Falling back to
-// macOS's compatibility mode ("Scale to fit below built-in camera") letterboxes the whole app,
-// which also shrinks the width and leaves bars on three sides. Rendering at the safe-area aspect
-// keeps the native width: the game fills everything below the housing and only that strip is black.
-// Fallout's HUD sits at the bottom, so it keeps the whole panel; Skyrim's compass is top-center and
-// would end up behind the housing, so it reserves the strip by default. FNV_NOTCH_SAFE=0/1 overrides.
+// Native macOS fullscreen (toggleFullScreen:) confines the window below the camera housing
+// (screen.frame.size.height - safeAreaInsets.top) on notched MacBooks. Rendering at the full
+// panel height causes CAMetalLayer's aspect-fit gravity to add left/right pillarbox bars, and
+// Skyrim's top-center compass could sit behind the notch if left unadjusted. Matching the usable
+// below-notch aspect for all games eliminates side bars at any display scaling and keeps top HUD
+// elements clear while leaving the housing strip black. FNV_NOTCH_SAFE=0/1 overrides.
 static BOOL notchSafeWanted(void) {
     const char *env = getenv("FNV_NOTCH_SAFE");
     if (env && env[0]) return env[0] != '0';
-#ifdef FNV_GAME_SKYRIM
     return YES;
-#else
-    return NO;
-#endif
 }
 
 // An explicit output resolution (FNV_OUTPUT_WIDTH/HEIGHT) is a deliberate choice; leave it alone.
@@ -286,7 +281,6 @@ static CGFloat notchTopInsetPoints(NSScreen *screen) {
     if (!(top >= 4)) return 0;
     return ceil(MIN(top, (CGFloat)80));
 }
-#endif
 
 // macOS virtual key code -> DirectInput scancode (DIK_*)
 static const uint8_t mac2dik[128] = {
@@ -1029,6 +1023,18 @@ static NSString *exeHash(NSURL *url) {
     CGFloat scale = screen ? screen.backingScaleFactor : 2.0;
     unsigned nativeW = 0, nativeH = 0, backingW = 0, backingH = 0;
     detectPhysicalDisplayPixels(screen, &nativeW, &nativeH, &backingW, &backingH);
+
+    CGFloat notchInset = 0;
+    if (notchSafeWanted() && !outputSizeOverridden()) {
+        CGFloat points = notchTopInsetPoints(screen);
+        CGFloat screenH = screen ? screen.frame.size.height : 0;
+        unsigned adjustedH = FNVNotchAdjustedPanelHeight(nativeH, screenH, points);
+        if (adjustedH < nativeH) {
+            nativeH = adjustedH;
+            notchInset = points;
+        }
+    }
+
     int hz = (screen && [screen respondsToSelector:@selector(maximumFramesPerSecond)]) ? (int)screen.maximumFramesPerSecond : 60;
     if (hz <= 0) hz = 60;
     fnv_display_set_refresh(hz);
@@ -1036,6 +1042,10 @@ static NSString *exeHash(NSURL *url) {
     if (backingW != nativeW || backingH != nativeH) {
         fprintf(stderr, "[display] physical panel %ux%u (desktop backing %ux%u)\n",
                 nativeW, nativeH, backingW, backingH);
+    }
+    if (notchInset > 0) {
+        fprintf(stderr, "[display] camera housing: %.0fpt reserved at the top, output %ux%u\n",
+                notchInset, nativeW, nativeH);
     }
 
 #ifdef FNV_PROBE
@@ -1085,24 +1095,7 @@ static NSString *exeHash(NSURL *url) {
     NSScreen *screen = NSScreen.mainScreen ?: NSScreen.screens.firstObject;
     CGFloat scale = self.screenScale ?: 2.0;
 
-    // Reserve the camera housing strip by rendering a shorter frame at full width (see
-    // notchSafeWanted). This applies to windowed launches too, so toggling fullscreen later keeps
-    // the same image aspect and still leaves the strip black; only the view placement differs.
-    unsigned panelW = self.nativeW, panelH = self.nativeH;
-    CGFloat notchInset = 0;
-    if (notchSafeWanted() && !outputSizeOverridden()) {
-        CGFloat points = notchTopInsetPoints(screen);
-        unsigned insetPx = points > 0 ? (unsigned)llround(points * scale) : 0;
-        if (insetPx > 0 && panelH > insetPx + 480) {
-            panelH -= insetPx;
-            notchInset = points;
-        }
-    }
-    if (notchInset > 0) {
-        fprintf(stderr, "[display] camera housing: %.0fpt reserved at the top, output %ux%u\n",
-                notchInset, panelW, panelH);
-    }
-    fnv_display_configure_scaled(panelW, panelH, settings.renderScale);
+    fnv_display_configure_scaled(self.nativeW, self.nativeH, settings.renderScale);
     fnv_graphics_configure(settings.upscaler, settings.antiAliasing);
     unsigned outW = fnv_output_width() ?: fnv_display_width();
     unsigned outH = fnv_output_height() ?: fnv_display_height();

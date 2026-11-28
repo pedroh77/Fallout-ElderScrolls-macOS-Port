@@ -1,4 +1,18 @@
 #import "FNVGameView.h"
+#import <math.h>
+
+unsigned FNVNotchAdjustedPanelHeight(unsigned panelH, CGFloat screenPointsH, CGFloat notchPoints) {
+    if (panelH <= 480u || !(screenPointsH > 0.0) || !(notchPoints > 0.0) || notchPoints >= screenPointsH) {
+        return panelH;
+    }
+    double exactInset = ((double)panelH * (double)notchPoints) / (double)screenPointsH;
+    double ceiled = ceil(exactInset - 1e-6);
+    if (!(ceiled > 0.0)) return panelH;
+    unsigned insetPx = (unsigned)ceiled;
+    if (panelH <= insetPx + 480u) return panelH;
+    unsigned adjusted = (panelH - insetPx) & ~1u;
+    return adjusted >= 480u ? adjusted : panelH;
+}
 
 @implementation FNVGameView
 
