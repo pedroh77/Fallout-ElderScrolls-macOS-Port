@@ -169,7 +169,25 @@ static void XInputGetState_(CPU *c) {
     memcpy(MEM + out, &state, 16);
     RET(c, 0, 2);
 }
-static void XInputSetState_(CPU *c) { RET(c, ARG(c, 0) || !fnv_analog_enabled() ? 1167 : 0, 2); }
+static void XInputSetState_(CPU *c) {
+    if (ARG(c, 0) || !fnv_analog_enabled()) { RET(c, 1167, 2); return; }
+    uint32_t in = ARG(c, 1);
+    if (!in) { RET(c, 87, 2); return; }
+    uint16_t left = (uint16_t)(MEM[in] | ((uint16_t)MEM[in + 1] << 8));
+    uint16_t right = (uint16_t)(MEM[in + 2] | ((uint16_t)MEM[in + 3] << 8));
+    if (trace_in()) {
+        static uint16_t last_l, last_r;
+        static int have_last;
+        if (!have_last || left != last_l || right != last_r) {
+            fprintf(stderr, "[xinput] SetState left=%u right=%u\n", (unsigned)left, (unsigned)right);
+            last_l = left;
+            last_r = right;
+            have_last = 1;
+        }
+    }
+    fnv_pad_set_rumble(left, right);
+    RET(c, 0, 2);
+}
 static void XInputGetCapabilities_(CPU *c) {
     if (ARG(c, 0) || !fnv_analog_enabled()) { RET(c, 1167, 3); return; }
     uint32_t out = ARG(c, 2);
@@ -179,6 +197,7 @@ static void XInputGetCapabilities_(CPU *c) {
     MEM[out + 4] = 0xff; MEM[out + 5] = 0xf3; // buttons: D-pad, menu, clicks, shoulders and ABXY
     MEM[out + 6] = MEM[out + 7] = 255;       // analog triggers
     P32(out + 8, 0x7fff7fff); P32(out + 12, 0x7fff7fff);
+    P32(out + 16, 0xffffffffu);              // Vibration: left & right motors supported
     RET(c, 0, 3);
 }
 const ShimTable xinput_shims = { (const Shim[]){

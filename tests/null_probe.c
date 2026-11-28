@@ -30,6 +30,17 @@ int main(void) {
     pad.ly = 16384;
     fnv_pad_physical_state(&pad, 1);
     assert(fnv_analog_enabled());
+
+    uint16_t rl = 0, rr = 0;
+    fnv_pad_set_rumble(12345, 54321);
+    assert(fnv_pad_consume_rumble(&rl, &rr) == 1 && rl == 12345 && rr == 54321);
+    assert(fnv_pad_consume_rumble(&rl, &rr) == 0);
+    fnv_pad_set_rumble(12345, 54321);
+    assert(fnv_pad_consume_rumble(&rl, &rr) == 0);
+    fnv_pad_reset();
+    assert(fnv_pad_consume_rumble(&rl, &rr) == 1 && rl == 0 && rr == 0);
+    fnv_pad_physical_state(&pad, 1);
+
     input_mouse_move(6, -3);
     int rc = fnv_probe(3);
     assert(rc == 0 && clears == 3);

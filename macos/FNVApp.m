@@ -1,7 +1,9 @@
 #import <AppKit/AppKit.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <CoreHaptics/CoreHaptics.h>
 #import <GameController/GameController.h>
 #import <CommonCrypto/CommonDigest.h>
+#import <os/lock.h>
 #import "FNVGameView.h"
 #import "FNVOptions.h"
 #import "FNVSurface.h"
@@ -312,6 +314,203 @@ static NSString *exeHash(NSURL *url) {
 }
 #endif
 
+@interface FNVHapticMotor : NSObject {
+    os_unfair_lock _stateLock;
+    BOOL _engineStarted;
+    BOOL _playing;
+    BOOL _needsRebuild;
+}
+@property (nonatomic, strong) CHHapticEngine *engine;
+@property (nonatomic, strong) CHHapticPattern *pattern;
+@property (nonatomic, strong) id<CHHapticPatternPlayer> player;
+@property (nonatomic, copy) GCHapticsLocality locality;
+@property (nonatomic) BOOL loggedRuntimeError;
+- (instancetype)initWithController:(GCController *)controller
+                          locality:(GCHapticsLocality)locality
+                         sharpness:(float)sharpness;
+- (void)setIntensity:(float)intensity;
+- (void)shutdown;
+@end
+
+@implementation FNVHapticMotor
+- (instancetype)initWithController:(GCController *)controller
+                          locality:(GCHapticsLocality)locality
+                         sharpness:(float)sharpness {
+    self = [super init];
+    if (!self) return nil;
+    _stateLock = OS_UNFAIR_LOCK_INIT;
+    if (!controller.haptics) return nil;
+    const char *locName = locality.UTF8String ?: "unknown";
+    CHHapticEngine *engine = [controller.haptics createEngineWithLocality:locality];
+    if (!engine) {
+        fprintf(stderr, "[haptics] createEngineWithLocality(%s) returned nil\n", locName);
+        return nil;
+    }
+    engine.playsHapticsOnly = YES;
+    __weak typeof(self) weakSelf = self;
+    engine.resetHandler = ^{
+        FNVHapticMotor *s = weakSelf;
+        if (!s) return;
+        os_unfair_lock_lock(&s->_stateLock);
+        s->_engineStarted = NO;
+        s->_playing = NO;
+        s->_needsRebuild = YES;
+        os_unfair_lock_unlock(&s->_stateLock);
+    };
+    engine.stoppedHandler = ^(CHHapticEngineStoppedReason reason) {
+        (void)reason;
+        FNVHapticMotor *s = weakSelf;
+        if (!s) return;
+        os_unfair_lock_lock(&s->_stateLock);
+        s->_engineStarted = NO;
+        s->_playing = NO;
+        os_unfair_lock_unlock(&s->_stateLock);
+    };
+    CHHapticEventParameter *pInt = [[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticIntensity value:1.0f];
+    CHHapticEventParameter *pShp = [[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticSharpness value:sharpness];
+    CHHapticEvent *ev = [[CHHapticEvent alloc] initWithEventType:CHHapticEventTypeHapticContinuous
+                                                      parameters:@[pInt, pShp]
+                                                    relativeTime:0.0
+                                                        duration:GCHapticDurationInfinite];
+    NSError *err = nil;
+    CHHapticPattern *pat = [[CHHapticPattern alloc] initWithEvents:@[ev] parameters:@[] error:&err];
+    if (!pat) {
+        fprintf(stderr, "[haptics] CHHapticPattern(%s) failed: %s\n",
+                locName, err ? err.localizedDescription.UTF8String : "unknown");
+        return nil;
+    }
+    id<CHHapticPatternPlayer> player = [engine createPlayerWithPattern:pat error:&err];
+    if (!player) {
+        fprintf(stderr, "[haptics] createPlayerWithPattern(%s) failed: %s\n",
+                locName, err ? err.localizedDescription.UTF8String : "unknown");
+        return nil;
+    }
+    _engine = engine;
+    _pattern = pat;
+    _player = player;
+    _locality = [locality copy];
+    return self;
+}
+
+- (void)setIntensity:(float)intensity {
+    if (intensity < 0.0f) intensity = 0.0f;
+    if (intensity > 1.0f) intensity = 1.0f;
+    if (!self.engine) return;
+
+    os_unfair_lock_lock(&_stateLock);
+    BOOL started = _engineStarted;
+    BOOL playing = _playing;
+    BOOL needsRebuild = _needsRebuild;
+    _needsRebuild = NO;
+    os_unfair_lock_unlock(&_stateLock);
+
+    if (needsRebuild) {
+        self.player = nil;
+        playing = NO;
+    }
+
+    if (intensity <= 0.001f) {
+        if (playing && self.player) {
+            [self.player stopAtTime:CHHapticTimeImmediate error:nil];
+        }
+        os_unfair_lock_lock(&_stateLock);
+        _playing = NO;
+        os_unfair_lock_unlock(&_stateLock);
+        return;
+    }
+
+    const char *locName = self.locality.UTF8String ?: "unknown";
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        NSError *err = nil;
+        if (!started) {
+            if (![self.engine startAndReturnError:&err]) {
+                if (!self.loggedRuntimeError) {
+                    fprintf(stderr, "[haptics] startAndReturnError(%s) failed: %s\n",
+                            locName, err ? err.localizedDescription.UTF8String : "unknown");
+                    self.loggedRuntimeError = YES;
+                }
+                return;
+            }
+            started = YES;
+            os_unfair_lock_lock(&_stateLock);
+            _engineStarted = YES;
+            os_unfair_lock_unlock(&_stateLock);
+        }
+        if (!self.player) {
+            self.player = [self.engine createPlayerWithPattern:self.pattern error:&err];
+            if (!self.player) {
+                if (!self.loggedRuntimeError) {
+                    fprintf(stderr, "[haptics] recreate player(%s) failed: %s\n",
+                            locName, err ? err.localizedDescription.UTF8String : "unknown");
+                    self.loggedRuntimeError = YES;
+                }
+                return;
+            }
+            playing = NO;
+        }
+        CHHapticDynamicParameter *dyn = [[CHHapticDynamicParameter alloc] initWithParameterID:CHHapticDynamicParameterIDHapticIntensityControl
+                                                                                        value:intensity
+                                                                                 relativeTime:0.0];
+        BOOL ok = YES;
+        if (!playing) {
+            // Set intensity before starting to avoid a full-strength initial burst, then reinforce
+            // right after start in case startAtTime resets dynamic parameters.
+            ok = [self.player sendParameters:@[dyn] atTime:CHHapticTimeImmediate error:&err] &&
+                 [self.player startAtTime:CHHapticTimeImmediate error:&err] &&
+                 [self.player sendParameters:@[dyn] atTime:CHHapticTimeImmediate error:&err];
+            if (ok) {
+                os_unfair_lock_lock(&_stateLock);
+                _playing = YES;
+                os_unfair_lock_unlock(&_stateLock);
+                self.loggedRuntimeError = NO;
+                return;
+            }
+        } else {
+            ok = [self.player sendParameters:@[dyn] atTime:CHHapticTimeImmediate error:&err];
+            if (ok) {
+                self.loggedRuntimeError = NO;
+                return;
+            }
+        }
+
+        os_unfair_lock_lock(&_stateLock);
+        _engineStarted = NO;
+        _playing = NO;
+        os_unfair_lock_unlock(&_stateLock);
+        started = NO;
+        playing = NO;
+        self.player = nil;
+        if (attempt == 1 && !self.loggedRuntimeError) {
+            fprintf(stderr, "[haptics] playback(%s) failed: %s\n",
+                    locName, err ? err.localizedDescription.UTF8String : "unknown");
+            self.loggedRuntimeError = YES;
+        }
+    }
+}
+
+- (void)shutdown {
+    os_unfair_lock_lock(&_stateLock);
+    BOOL started = _engineStarted;
+    BOOL playing = _playing;
+    _engineStarted = NO;
+    _playing = NO;
+    _needsRebuild = NO;
+    os_unfair_lock_unlock(&_stateLock);
+
+    self.engine.resetHandler = nil;
+    self.engine.stoppedHandler = nil;
+    if (playing && self.player) {
+        [self.player stopAtTime:CHHapticTimeImmediate error:nil];
+    }
+    if (started && self.engine) {
+        [self.engine stopWithCompletionHandler:nil];
+    }
+    self.player = nil;
+    self.pattern = nil;
+    self.engine = nil;
+}
+@end
+
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate> {
     double _mouseAccumX;
     double _mouseAccumY;
@@ -326,6 +525,10 @@ static NSString *exeHash(NSURL *url) {
 @property (nonatomic, strong) FNVGameView *gameContainer;
 @property (nonatomic, strong) NSTextField *statusLabel;
 @property (nonatomic, strong) NSTimer *padTimer;
+@property (nonatomic, strong) GCController *hapticController;
+@property (nonatomic, strong) FNVHapticMotor *leftMotor;
+@property (nonatomic, strong) FNVHapticMotor *rightMotor;
+@property (nonatomic) BOOL hapticDualMotor;
 @property (nonatomic) BOOL cursorCaptured;
 @property (nonatomic) id eventMonitor;
 #ifndef FNV_PROBE
@@ -412,12 +615,82 @@ static NSString *exeHash(NSURL *url) {
     }
 }
 
+- (void)teardownHaptics {
+    [self.leftMotor shutdown];
+    [self.rightMotor shutdown];
+    self.leftMotor = nil;
+    self.rightMotor = nil;
+    self.hapticController = nil;
+    self.hapticDualMotor = NO;
+}
+
+- (void)ensureHapticsForController:(GCController *)controller {
+    if (controller == self.hapticController) return;
+    [self teardownHaptics];
+    if (!controller) return;
+    const char *vendor = controller.vendorName.UTF8String ?: "unknown";
+    const char *cat = controller.productCategory.UTF8String ?: "unknown";
+    if (!controller.haptics) {
+        fprintf(stderr, "[haptics] controller '%s' (%s) reports no haptics support\n", vendor, cat);
+        self.hapticController = controller;
+        return;
+    }
+    NSSet<GCHapticsLocality> *locs = controller.haptics.supportedLocalities;
+    if ([locs containsObject:GCHapticsLocalityLeftHandle] && [locs containsObject:GCHapticsLocalityRightHandle]) {
+        FNVHapticMotor *lm = [[FNVHapticMotor alloc] initWithController:controller locality:GCHapticsLocalityLeftHandle sharpness:0.2f];
+        FNVHapticMotor *rm = [[FNVHapticMotor alloc] initWithController:controller locality:GCHapticsLocalityRightHandle sharpness:0.85f];
+        if (lm && rm) {
+            self.leftMotor = lm;
+            self.rightMotor = rm;
+            self.hapticDualMotor = YES;
+        } else {
+            [lm shutdown];
+            [rm shutdown];
+        }
+    }
+    if (!self.hapticDualMotor) {
+        self.leftMotor = [[FNVHapticMotor alloc] initWithController:controller locality:GCHapticsLocalityDefault sharpness:0.4f];
+    }
+    if (self.hapticDualMotor) {
+        fprintf(stderr, "[haptics] dual-motor haptics ready for '%s' (%s)\n", vendor, cat);
+    } else if (self.leftMotor) {
+        fprintf(stderr, "[haptics] single-motor haptics ready for '%s' (%s)\n", vendor, cat);
+    } else {
+        fprintf(stderr, "[haptics] failed to initialize haptics for '%s' (%s)\n", vendor, cat);
+    }
+    self.hapticController = controller;
+}
+
+- (void)updateRumbleForController:(GCController *)controller {
+    if (!controller) {
+        if (self.hapticController) [self teardownHaptics];
+        return;
+    }
+    if (self.hapticController && controller != self.hapticController) {
+        [self teardownHaptics];
+    }
+    uint16_t l = 0, r = 0;
+    if (!fnv_pad_consume_rumble(&l, &r)) return;
+    if (l == 0 && r == 0 && !self.hapticController) return;
+    [self ensureHapticsForController:controller];
+    float lf = (float)l / 65535.0f;
+    float rf = (float)r / 65535.0f;
+    if (self.hapticDualMotor) {
+        [self.leftMotor setIntensity:lf];
+        [self.rightMotor setIntensity:rf];
+    } else {
+        [self.leftMotor setIntensity:fmaxf(lf, rf)];
+    }
+}
+
 - (void)releaseAllInputs {
     _mouseAccumX = 0.0;
     _mouseAccumY = 0.0;
     for (int i = 0; i < 8; ++i) input_mouse_button(i, 0);
     for (int dik = 1; dik < 256; ++dik) input_key(dik, 0);
     fnv_pad_reset();
+    [self.leftMotor setIntensity:0.0f];
+    [self.rightMotor setIntensity:0.0f];
 }
 
 - (void)handleEvent:(NSEvent *)e {
@@ -517,9 +790,11 @@ static NSString *exeHash(NSURL *url) {
 }
 
 - (void)pollControllers {
+    GCController *activeController = nil;
     GCExtendedGamepad *pad = nil;
     for (GCController *controller in GCController.controllers) {
         if (controller.extendedGamepad) {
+            activeController = controller;
             pad = controller.extendedGamepad;
             break;
         }
@@ -548,6 +823,7 @@ static NSString *exeHash(NSURL *url) {
         if (pad.buttonY.isPressed) state.buttons |= 0x8000;
     }
     fnv_pad_physical_state(&state, pad != nil);
+    [self updateRumbleForController:activeController];
 }
 
 - (void)showStatus:(NSString *)message {
@@ -970,6 +1246,7 @@ static NSString *exeHash(NSURL *url) {
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
     (void)notification;
+    [self teardownHaptics];
     [self setCursorCapture:NO];
     if (self.eventMonitor) {
         [NSEvent removeMonitor:self.eventMonitor];

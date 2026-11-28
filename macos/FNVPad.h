@@ -13,3 +13,5 @@ int fnv_pad_connected(void);
 int fnv_analog_enabled(void);
 void fnv_pad_snapshot(FNVPadState *state);
 void fnv_pad_reset(void);
+void fnv_pad_set_rumble(uint16_t left_motor, uint16_t right_motor);
+int fnv_pad_consume_rumble(uint16_t *left_motor, uint16_t *right_motor);

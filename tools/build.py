@@ -467,7 +467,7 @@ def main():
         frameworks = [
             'Foundation', 'AppKit', 'Metal', 'MetalFX', 'QuartzCore', 'CoreGraphics',
             'AVFoundation', 'CoreVideo', 'CoreMedia', 'ImageIO',
-            'UniformTypeIdentifiers', 'GameController',
+            'UniformTypeIdentifiers', 'GameController', 'CoreHaptics',
         ]
         libraries = [str(codec / 'lib' / ('lib' + n + '.a')) for n in ['vorbisfile', 'vorbis', 'ogg']] if codec else []
         if unicorn:
