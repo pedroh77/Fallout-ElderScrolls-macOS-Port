@@ -14,11 +14,13 @@
 #include "FNVNativeMedia.h"
 #endif
 #include "input.h"
+#include <errno.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/resource.h>
+#include <time.h>
 #include <unistd.h>
 
 static CAMetalLayer *screenLayer;
@@ -64,6 +66,31 @@ static pthread_mutex_t activeLock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t activeChanged = PTHREAD_COND_INITIALIZER;
 static BOOL active = YES;
 
+static pthread_mutex_t fullscreenLock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t fullscreenDone = PTHREAD_COND_INITIALIZER;
+static BOOL fullscreenTransitionPending = NO;
+
+static void setFullscreenTransitionPending(BOOL pending) {
+    pthread_mutex_lock(&fullscreenLock);
+    fullscreenTransitionPending = pending;
+    if (!pending) pthread_cond_broadcast(&fullscreenDone);
+    pthread_mutex_unlock(&fullscreenLock);
+}
+
+static void waitForFullscreenTransition(void) {
+    if (NSThread.isMainThread) return;
+    pthread_mutex_lock(&fullscreenLock);
+    if (fullscreenTransitionPending) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec += 3;
+        while (fullscreenTransitionPending) {
+            if (pthread_cond_timedwait(&fullscreenDone, &fullscreenLock, &ts) == ETIMEDOUT) break;
+        }
+    }
+    pthread_mutex_unlock(&fullscreenLock);
+}
+
 static void setActive(BOOL value) {
     pthread_mutex_lock(&activeLock);
     active = value;
@@ -83,7 +110,9 @@ static void onMain(dispatch_block_t work) {
 }
 
 CAMetalLayer *fnv_surface(id<MTLDevice> device, CGSize size) {
+    waitForFullscreenTransition();
     onMain(^{
+        if (mainWindow) [mainWindow layoutIfNeeded];
         lockedDrawableSize = size;
         screenLayer.device = device;
         screenLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
@@ -93,6 +122,28 @@ CAMetalLayer *fnv_surface(id<MTLDevice> device, CGSize size) {
         screenLayer.backgroundColor = CGColorGetConstantColor(kCGColorBlack);
         screenLayer.displaySyncEnabled = getenv("FNV_NOVSYNC") ? NO : YES;
         screenLayer.maximumDrawableCount = 3;
+
+        // Present one initial black frame on the main thread so injected Metal hooks (such as
+        // Valve's Steam Overlay CMetalRenderer) run UpdateWindowBounds() synchronously before
+        // their first RenderOverlay() instead of starting with hardcoded 1920x1200 bounds
+        // off-thread and jumping DPI mid-notification.
+        id<MTLCommandQueue> primeQueue = [device newCommandQueue];
+        id<CAMetalDrawable> drawable = [screenLayer nextDrawable];
+        if (primeQueue && drawable && drawable.texture) {
+            id<MTLCommandBuffer> cmd = [primeQueue commandBuffer];
+            if (cmd) {
+                MTLRenderPassDescriptor *rpd = [MTLRenderPassDescriptor renderPassDescriptor];
+                rpd.colorAttachments[0].texture = drawable.texture;
+                rpd.colorAttachments[0].loadAction = MTLLoadActionClear;
+                rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
+                rpd.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+                id<MTLRenderCommandEncoder> enc = [cmd renderCommandEncoderWithDescriptor:rpd];
+                if (enc) [enc endEncoding];
+                [cmd presentDrawable:drawable];
+                [cmd commit];
+                [cmd waitUntilScheduled];
+            }
+        }
     });
     return screenLayer;
 }
@@ -893,7 +944,8 @@ static NSString *exeHash(NSURL *url) {
 
     const char *headlessEnv = getenv("FNV_HEADLESS");
     BOOL isHeadless = (headlessEnv && headlessEnv[0] && headlessEnv[0] != '0');
-    if (fullscreen && !isHeadless) {
+    if (fullscreen && !isHeadless && !(self.window.styleMask & NSWindowStyleMaskFullScreen)) {
+        setFullscreenTransitionPending(YES);
         [self.window toggleFullScreen:nil];
     }
 
@@ -1168,6 +1220,9 @@ static NSString *exeHash(NSURL *url) {
 - (void)windowDidEnterFullScreen:(NSNotification *)notification {
     (void)notification;
     self.gameContainer.fullscreenMode = YES;
+    [self.window layoutIfNeeded];
+    [self.gameContainer layoutGameView];
+    setFullscreenTransitionPending(NO);
     if ([self shouldCaptureCursor]) {
         if (_cursorCaptured) {
             [self warpCursorToWindowCenter];
@@ -1178,18 +1233,24 @@ static NSString *exeHash(NSURL *url) {
     }
 }
 
+- (void)windowDidFailToEnterFullScreen:(NSWindow *)window {
+    (void)window;
+    setFullscreenTransitionPending(NO);
+}
+
 - (void)windowDidExitFullScreen:(NSNotification *)notification {
     (void)notification;
     self.gameContainer.fullscreenMode = NO;
 }
 
 - (void)windowWillClose:(NSNotification *)notification {
+    if (notification.object == self.window) {
+        setFullscreenTransitionPending(NO);
+    }
 #ifndef FNV_PROBE
     if (notification.object == self.optionsWindow && !self.gameLaunched) {
         [NSApp terminate:nil];
     }
-#else
-    (void)notification;
 #endif
 }
 
@@ -1246,6 +1307,7 @@ static NSString *exeHash(NSURL *url) {
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
     (void)notification;
+    setFullscreenTransitionPending(NO);
     [self teardownHaptics];
     [self setCursorCapture:NO];
     if (self.eventMonitor) {
