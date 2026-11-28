@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 from state_probes import normalize, instrument
+import script_ext_patches
 from native_codecs import validate as validate_codecs
 from app_icon import compile_icon
 
@@ -428,6 +429,7 @@ def main():
     p.add_argument('--steam-api-dylib', type=Path, help='optional Valve ARM64 libsteam_api.dylib to bundle in Frameworks/')
     p.add_argument('--steam-appid', default=None, help='Steam AppID written to steam_appid.txt when bundling libsteam_api.dylib')
     p.add_argument('--no-call-trace', action='store_true', help='omit per-function diagnostic ring writes')
+    p.add_argument('--with-nvse', action='store_true', help='enable experimental NVSE-lite native script extender (FNV only)')
     p.add_argument('--deployment-target', default=None, help='macOS deployment target (default: host major.0, min 14.0)')
     p.add_argument('--version', default=None, help='positive numeric app build version')
     args = p.parse_args()
@@ -441,6 +443,10 @@ def main():
     matched_probes = set()
     probe = args.target == 'probe'
     host_check = args.target == 'host-check'
+    exe_sha = digest(args.exe) if (not probe and args.exe and args.exe.is_file()) else None
+    script_ext_active = bool(
+        args.with_nvse and args.game == 'fnv' and not probe and not host_check and exe_sha and script_ext_patches.is_supported(exe_sha)
+    )
     codec = validate_codecs(args.codec_prefix, 'macos') if args.codec_prefix else None
     if args.target == 'game' and not codec:
         p.error('game requires --codec-prefix for native sound decoding')
@@ -512,12 +518,15 @@ def main():
             out = tmp / f'{idx}.o'
             content = source.read_bytes()
             matched = set()
+            se_matched = set()
             patched = False
             if args.game == 'skyrim' and args.generated and source.parent.resolve() == args.generated.resolve():
                 content, patched = patch_generated_tu(content)
+            if script_ext_active and args.generated and source.parent.resolve() == args.generated.resolve():
+                content, se_matched = script_ext_patches.patch_tu(content, exe_sha)
+                patched = patched or bool(se_matched)
             if probes and args.generated and source.parent.resolve() == args.generated.resolve():
                 content, matched = instrument(content, probes)
-                matched_probes.update(matched)
             compiled_source = source
             if patched or matched:
                 compiled_source = tmp / ('patched-' + source.name)
@@ -525,6 +534,8 @@ def main():
             flags = ['-O1', '-I', str(H), '-I', str(R), '-I', str(M)]
             if profile['define']:
                 flags.append(profile['define'])
+            if script_ext_active and source.name == 'script_ext.c':
+                flags.append('-DFNV_SCRIPT_EXT_PATCHED=1')
             if codec:
                 flags += ['-DFNV_HAVE_VORBIS', '-I', str(codec / 'include')]
             if unicorn and source.name == 'fallback.c':
@@ -540,7 +551,7 @@ def main():
             key = hashlib.sha256(config + json.dumps(base + flags).encode() + source.name.encode() + content).hexdigest()
             stored = args.cache / (key + '.o') if args.cache else None
             if stored and stored.exists() and digest(stored) == old_manifest.get(stored.name):
-                return str(stored), True
+                return str(stored), True, matched, se_matched
             cmd = base + flags + ['-c', str(compiled_source), '-o', str(out)]
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             if res.returncode != 0:
@@ -548,10 +559,11 @@ def main():
             if stored:
                 os.replace(out, stored)
                 out = stored
-            return str(out), False
+            return str(out), False, matched, se_matched
 
         progress = _CompileProgress(len(sources))
         objects = [None] * len(sources)
+        matched_se = set()
         reused_count = 0
         built_count = 0
         progress.start()
@@ -566,7 +578,7 @@ def main():
                     for fut in done_set:
                         idx = future_to_idx[fut]
                         try:
-                            obj_path, reused = fut.result()
+                            obj_path, reused, m_probe, m_se = fut.result()
                         except BaseException as exc:
                             for rem in pending:
                                 rem.cancel()
@@ -575,6 +587,8 @@ def main():
                                 sys.stderr.write(exc.output)
                             raise
                         objects[idx] = obj_path
+                        matched_probes.update(m_probe)
+                        matched_se.update(m_se)
                         if reused:
                             reused_count += 1
                         else:
@@ -585,6 +599,12 @@ def main():
             progress.restore_cursor()
         if probes and set(probes) != matched_probes:
             raise ValueError('Requested diagnostic entries absent from generated source')
+        if script_ext_active:
+            expected_se = script_ext_patches.expected_labels(exe_sha)
+            if matched_se != expected_se:
+                missing_se = sorted(expected_se - matched_se)
+                raise ValueError(f'Missing ScriptCommands relocation labels: {missing_se[:10]}')
+            print(f'  NVSE-lite: patched {len(matched_se)} ScriptCommands references across generated TUs', flush=True)
         if args.cache:
             (args.cache / 'manifest.json').write_text(json.dumps({Path(path).name: digest(Path(path)) for path in objects}, indent=2))
         if host_check:

@@ -6,6 +6,9 @@
 #include "com.h"
 #include "input.h"
 #include "FNVPad.h"
+extern void input_dinput_keyboard_state(uint8_t out[256]);
+extern void input_dinput_mouse_state(int32_t *dx, int32_t *dy, int32_t *dz, uint8_t b[8]);
+extern int input_is_scancode_disabled(int sc);
 #if defined(FNV_GAME_INPUT_CONTEXT) && !defined(FNV_PROBE)
 static void fnv_sample_game_context(void);
 #else
@@ -51,9 +54,9 @@ static void Dev_GetDeviceState(CPU *c) {
     uint32_t n = ARG(c, 1), out = ARG(c, 2);
     n_state[dev_kind(c) & 1]++; report();
     memset(MEM + out, 0, n);
-    if (dev_kind(c) == 0) { uint8_t k[256]; input_keyboard_state(k); memcpy(MEM + out, k, n < 256 ? n : 256); }
+    if (dev_kind(c) == 0) { uint8_t k[256]; input_dinput_keyboard_state(k); memcpy(MEM + out, k, n < 256 ? n : 256); }
     else {
-        int32_t dx, dy, dz; uint8_t b[8]; input_mouse_state(&dx, &dy, &dz, b);
+        int32_t dx, dy, dz; uint8_t b[8]; input_dinput_mouse_state(&dx, &dy, &dz, b);
         if (n >= 12) { P32(out, (uint32_t)dx); P32(out + 4, (uint32_t)dy); P32(out + 8, (uint32_t)dz); }
         memcpy(MEM + out + 12, b, n >= 20 ? 8 : n > 12 ? n - 12 : 0);    // DIMOUSESTATE (4 buttons) / DIMOUSESTATE2 (8)
     }
@@ -70,6 +73,15 @@ static void Dev_GetDeviceData(CPU *c) {
     for (; n < cap; n++) {
         uint32_t o, d;
         if (!input_pop_event(dev, &o, &d, peek ? (int)n : -1)) break;
+        if (!peek && d != 0) {
+            int sc = -1;
+            if (dev == 0 && o < 256) sc = (int)o;
+            else if (dev == 1 && o >= 12 && o < 20) sc = 256 + (int)(o - 12);
+            if (sc >= 0 && input_is_scancode_disabled(sc)) {
+                n--;
+                continue;
+            }
+        }
         uint32_t e = arr + n * sz;
         memset(MEM + e, 0, sz);
         P32(e, o); P32(e + 4, d); P32(e + 8, (uint32_t)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000000)); P32(e + 12, ++seq);

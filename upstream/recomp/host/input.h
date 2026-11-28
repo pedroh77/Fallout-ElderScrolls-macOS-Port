@@ -12,6 +12,7 @@ void input_frame_draws(uint64_t draws_this_frame);             // FNV_INPUT_SCRI
 
 // DirectInput side
 void input_keyboard_state(uint8_t out[256]);
+void input_mouse_buttons(uint8_t out[8]);
 void input_mouse_state(int32_t *dx, int32_t *dy, int32_t *dz, uint8_t buttons[8]);   // deltas since last call
 // buffered events: device 0 = keyboard, 1 = mouse. Returns 1 and fills (ofs, data) if one is pending.
 int input_pop_event(int device, uint32_t *ofs, uint32_t *data, int peek_index);

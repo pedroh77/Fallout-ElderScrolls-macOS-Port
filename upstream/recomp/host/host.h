@@ -5,6 +5,9 @@
 
 #define MAX_IMPORTS 4096
 #define IMPORT_THUNK_BASE 0xFEE00000u   // import slot i -> IMPORT_THUNK_BASE + 4*i (shared with difftest)
+#define SCRIPT_THUNK_BASE 0xFEE20000u   // script/callback slot i -> SCRIPT_THUNK_BASE + 4*i
+#define SCRIPT_THUNK_END  0xFEE30000u
+#define MAX_SCRIPT_THUNKS 4096
 #define HOST_EXIT_THUNK  0xFEDF0000u    // return address of the entry point: run finished
 enum { TRAP_IMPORT = 8 };
 
@@ -22,6 +25,7 @@ int host_shimmed_count(void);
 void host_init_args(int argc, char **argv);
 void host_thread_init(CPU *c, uint32_t stack_size);
 void rt_import_call(CPU *c, uint32_t addr);
+void rt_script_call(CPU *c, uint32_t addr);
 
 // guest memory helpers
 extern uint8_t *host_tls_template;                // static TLS template (NULL: the image has none)

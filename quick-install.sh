@@ -6,7 +6,7 @@
 # into a standalone Apple Silicon macOS bundle ("Fallout New Vegas.app",
 # "Fallout 3.app", or "Skyrim.app").
 #
-# Usage: quick-install.sh [--game fnv|fallout3|skyrim] [--download|--download-steam|--download-gog] [--dmg] [--keep-cache] [--keep-ghidra] [--unpack-drm] [--no-steam] [--with-steam] [-h|--help] [game_path]
+# Usage: quick-install.sh [--game fnv|fallout3|skyrim] [--download|--download-steam|--download-gog] [--dmg] [--keep-cache] [--keep-ghidra] [--unpack-drm] [--no-steam] [--with-steam] [--with-nvse] [-h|--help] [game_path]
 #   --game <id>       select game explicitly: fnv, fallout3, or skyrim (default:
 #                     auto-detect; a numbered menu appears when several are found)
 #   --download        download your Windows copy interactively from Steam or GOG
@@ -18,6 +18,7 @@
 #   --unpack-drm      unattended: allow downloading Steamless + Mono to strip SteamStub DRM
 #   --no-steam        keep Steam builds in offline mode (skip Steam launcher, overlay & libsteam_api.dylib; already default for Fallout 3)
 #   --with-steam      opt into Steam launcher & Overlay for Fallout 3 Steam builds (off by default)
+#   --with-nvse       opt into experimental NVSE-lite native script extender for Fallout: New Vegas (off by default)
 #   -h, --help        show help text and exit
 #   game_path         optional GOG installer (.exe), folder containing FalloutNV.exe,
 #                     Fallout3.exe, or TESV.exe + Data/, or an existing app bundle.
@@ -221,6 +222,7 @@ Options:
   --unpack-drm                  Unattended: strip SteamStub DRM with Steamless + Mono
   --no-steam                    Keep Steam builds offline (skip launcher & overlay)
   --with-steam                  Enable Steam launcher & Overlay for Fallout 3 Steam
+  --with-nvse                   Enable experimental NVSE-lite script extender (FNV only)
   -h, --help                    Show this help message and exit
 
 Arguments:
@@ -247,6 +249,7 @@ KEEP_GHIDRA=no
 UNPACK_DRM=no
 NO_STEAM=no
 WITH_STEAM=no
+WITH_NVSE=no
 GAME_ID=""
 GAME_ARG=""
 BREW_INSTALLED=()
@@ -267,6 +270,7 @@ while [ $# -gt 0 ]; do
 		--unpack-drm) UNPACK_DRM=yes ;;
 		--no-steam) NO_STEAM=yes ;;
 		--with-steam) WITH_STEAM=yes ;;
+		--with-nvse) WITH_NVSE=yes ;;
 		--game)
 			shift
 			[ $# -gt 0 ] || die "--game requires an argument (fnv, fallout3, or skyrim)."
@@ -1653,14 +1657,19 @@ if [ -f "$GEN_DIR/table.c" ] && [ -f "$GEN_DIR/stubs.c" ] && ls "$GEN_DIR"/tu_*.
 	ok "Using cached translated C sources ($GEN_DIR)"
 else
 	rm -rf "$GEN_DIR"
+	# Isolate Ghidra's user settings/OSGi compiled-bundle cache per translation run so
+	# cached .class files compiled under a different JDK cannot trigger UnsupportedClassVersionError,
+	# and LaunchSupport does not overwrite the user's own ~/Library/ghidra settings.
 	GHIDRA_PROJ="$TRANS_WORK/ghidra"
+	GHIDRA_CONFIG="$TRANS_WORK/ghidra-config"
 	GHIDRA_LOG="$TRANS_WORK/ghidra.log"
 	PASS_OUT="$TRANS_WORK/passes"
 	JSONL="$TRANS_WORK/all.jsonl"
 	SCRIPTS="$SCRIPT_DIR/tools/ghidra"
 	EXE_NAME="$(basename "$EXE_PATH")"
 
-	mkdir -p "$GHIDRA_PROJ" "$PASS_OUT"
+	rm -rf "$GHIDRA_CONFIG"
+	mkdir -p "$GHIDRA_PROJ" "$GHIDRA_CONFIG" "$PASS_OUT"
 	SYM_DIR=""
 	if [ "$GAME_ID" = fallout3 ]; then
 		if [ "$ACTUAL_SHA" = "$F3_GOG_EXE_SHA256" ]; then
@@ -1683,7 +1692,7 @@ else
 		ok "Using precomputed function & jump-table metadata ($SYM_DIR)"
 		rm -rf "$GHIDRA_PROJ/$GHIDRA_PROJ_NAME.gpr" "$GHIDRA_PROJ/$GHIDRA_PROJ_NAME.rep"
 		run_logged_task "Disassembling & exporting P-code (~1 min, no Ghidra auto-analysis)" "$TRANS_WORK/ghidra-console.log" \
-			env GHIDRA_HEADLESS_MAXMEM=4G "$HEADLESS" "$GHIDRA_PROJ" "$GHIDRA_PROJ_NAME" \
+			env XDG_CONFIG_HOME="$GHIDRA_CONFIG" GHIDRA_HEADLESS_MAXMEM=4G "$HEADLESS" "$GHIDRA_PROJ" "$GHIDRA_PROJ_NAME" \
 			-import "$EXE_PATH" -noanalysis \
 			-scriptPath "$SCRIPTS" \
 			-postScript ApplyMetadataAndDump.java "$SYM_DIR" "$JSONL" \
@@ -1710,7 +1719,7 @@ else
 			rm -rf "$GHIDRA_PROJ/$GHIDRA_PROJ_NAME.gpr" "$GHIDRA_PROJ/$GHIDRA_PROJ_NAME.rep"
 			printf '  %sRunning Ghidra import & auto-analysis (heap %s, first run only)...%s\n' "$DIM" "$GHIDRA_HEADLESS_MAXMEM" "$RESET"
 			run_logged_task "Ghidra import & analysis ($EXE_NAME)" "$TRANS_WORK/ghidra-console.log" \
-				"$HEADLESS" "$GHIDRA_PROJ" "$GHIDRA_PROJ_NAME" -import "$EXE_PATH" \
+				env XDG_CONFIG_HOME="$GHIDRA_CONFIG" "$HEADLESS" "$GHIDRA_PROJ" "$GHIDRA_PROJ_NAME" -import "$EXE_PATH" \
 				-log "$GHIDRA_LOG" -scriptlog "$TRANS_WORK/script.log" \
 				|| die "Ghidra import & analysis failed (see $TRANS_WORK/ghidra-console.log)"
 			touch "$GHIDRA_PROJ/ghidra.done"
@@ -1719,7 +1728,7 @@ else
 		fi
 
 		run_logged_task "Repairing functions, jump tables & CRT tables (pass 1/2)" "$TRANS_WORK/ghidra-console.log" \
-			"$HEADLESS" "$GHIDRA_PROJ" "$GHIDRA_PROJ_NAME" -process "$EXE_NAME" -noanalysis \
+			env XDG_CONFIG_HOME="$GHIDRA_CONFIG" "$HEADLESS" "$GHIDRA_PROJ" "$GHIDRA_PROJ_NAME" -process "$EXE_NAME" -noanalysis \
 			-scriptPath "$SCRIPTS" \
 			-postScript FixNoReturn.java \
 			-postScript ResolveJumpTables.java \
@@ -1728,7 +1737,7 @@ else
 			|| die "Ghidra pass 1/2 failed (see $TRANS_WORK/ghidra-console.log)"
 
 		if ! run_logged_task "Repairing functions, CRT operation tables & exporting P-code (pass 2/2)" "$TRANS_WORK/ghidra-console.log" \
-			"$HEADLESS" "$GHIDRA_PROJ" "$GHIDRA_PROJ_NAME" -process "$EXE_NAME" -noanalysis \
+			env XDG_CONFIG_HOME="$GHIDRA_CONFIG" "$HEADLESS" "$GHIDRA_PROJ" "$GHIDRA_PROJ_NAME" -process "$EXE_NAME" -noanalysis \
 			-scriptPath "$SCRIPTS" \
 			-postScript FixNoReturn.java \
 			-postScript ResolveJumpTables.java \
@@ -1739,7 +1748,7 @@ else
 			warn "ResolveCrtOperationTables did not apply; retrying pass 2 without CRT table recovery"
 			rm -f "$PASS_OUT/crt-report.json" "$PASS_OUT/crt-extra.json"
 			run_logged_task "Repairing functions & exporting P-code (pass 2/2 fallback)" "$TRANS_WORK/ghidra-console.log" \
-				"$HEADLESS" "$GHIDRA_PROJ" "$GHIDRA_PROJ_NAME" -process "$EXE_NAME" -noanalysis \
+				env XDG_CONFIG_HOME="$GHIDRA_CONFIG" "$HEADLESS" "$GHIDRA_PROJ" "$GHIDRA_PROJ_NAME" -process "$EXE_NAME" -noanalysis \
 				-scriptPath "$SCRIPTS" \
 				-postScript FixNoReturn.java \
 				-postScript ResolveJumpTables.java \
@@ -1772,7 +1781,7 @@ PY
 	fi
 
 	if [ "$KEEP_GHIDRA" = no ]; then
-		rm -rf "$GHIDRA_PROJ" "$JSONL" "$JSONL.regs.json" "$JSONL.userops.json"
+		rm -rf "$GHIDRA_PROJ" "$GHIDRA_CONFIG" "$JSONL" "$JSONL.regs.json" "$JSONL.userops.json"
 		ok "Cleaned temporary Ghidra project & P-code dump to save disk space"
 	fi
 fi
@@ -1862,6 +1871,16 @@ elif [ "$GAME_ID" = fallout3 ] && [ "$NO_STEAM" != yes ] && [ "$ACTUAL_SHA" = "$
 	ok "Building Fallout 3 standalone offline (default; pass --with-steam for Steam Overlay)"
 fi
 
+NVSE_BUILD_ARGS=()
+if [ "$WITH_NVSE" = yes ]; then
+	if [ "$GAME_ID" = fnv ]; then
+		NVSE_BUILD_ARGS=(--with-nvse)
+		ok "Experimental NVSE-lite script extender enabled (--with-nvse)"
+	else
+		warn "--with-nvse currently applies only to Fallout: New Vegas; ignoring for $GAME_ID"
+	fi
+fi
+
 printf '  %sCompiling translation units with Apple Clang (cached incrementally)...%s\n' "$DIM" "$RESET"
 python3 "$SCRIPT_DIR/tools/build.py" game \
 	--game "$GAME_ID" \
@@ -1873,6 +1892,7 @@ python3 "$SCRIPT_DIR/tools/build.py" game \
 	--out "$BUILD_OUT" \
 	--app-name "$APP_NAME" \
 	${STEAM_BUILD_ARGS[@]+"${STEAM_BUILD_ARGS[@]}"} \
+	${NVSE_BUILD_ARGS[@]+"${NVSE_BUILD_ARGS[@]}"} \
 	--no-call-trace
 
 APP="$BUILD_OUT/$APP_NAME.app"

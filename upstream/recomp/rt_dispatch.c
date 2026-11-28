@@ -11,6 +11,8 @@ extern const int rt_fn_count;
 // Import thunks (0xFEE00000 + 4*i) belong to the host; the test library has no host, so its
 // weak default just traps like any other unknown address.
 __attribute__((weak)) void rt_import_call(CPU *c, uint32_t a) { rt_trap(c, TRAP_NOFN, a); }
+// Script/callback thunks (0xFEE20000 + 4*i) dispatch to native script extender handlers.
+__attribute__((weak)) void rt_script_call(CPU *c, uint32_t a) { rt_trap(c, TRAP_NOFN, a); }
 // No native function for an address: the host interprets it (fallback.c); the test library traps.
 __attribute__((weak)) void rt_fallback(CPU *c, uint32_t a) { rt_trap(c, TRAP_NOFN, a); }
 
@@ -50,6 +52,7 @@ static uint64_t rt_trace_ms(void) { static uint64_t t0; uint64_t t = clock_getti
 
 void rt_call(CPU *c, uint32_t a) {
     if (a >= 0xFEE00000u && a < 0xFEE10000u) { rt_import_call(c, a); return; }
+    if (a >= 0xFEE20000u && a < 0xFEE30000u) { rt_script_call(c, a); return; }
 #ifndef FNV_GAME_SKYRIM
     if (__builtin_expect(a == 0x7664d0u || a == 0x766430u || a == 0x7664a0u || a == 0x766510u || a == 0x767660u, 0) && rt_trace_voice()) {
         uint32_t esp = (uint32_t)LD(c->r + 16, 4);

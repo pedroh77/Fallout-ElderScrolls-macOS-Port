@@ -16,6 +16,7 @@
 #include <pthread/qos.h>
 #include "../rt.h"
 #include "host.h"
+#include "script_ext.h"
 int host_run_guest(CPU *c, uint32_t entry);
 
 uint8_t *MEM;
@@ -223,6 +224,7 @@ int fnv_run_game(int argc, char **argv) {
     host_init_args(argc - 1, argv + 1);
     uint32_t entry = load_pe(argv[1]);
     bind_imports(host_image_base);
+    script_ext_init();
     fprintf(stderr, "[host] image @%#x, entry %#x, %d imports (%d shimmed)\n", host_image_base, entry,
             host_import_count, host_shimmed_count());
 

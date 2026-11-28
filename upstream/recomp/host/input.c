@@ -10,6 +10,9 @@ static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
 static uint8_t keys[256];
 static int32_t mdx, mdy, mdz;
 static uint8_t mbtn[8];
+static uint8_t disabled_scancodes[264];
+static uint8_t script_held[264];
+static uint8_t script_tapped[264];
 #define QN 1024
 typedef struct { uint32_t ofs, data; } Ev;
 static Ev q[2][QN];
@@ -73,6 +76,74 @@ void input_mouse_button(int b, int down) {
 }
 
 void input_keyboard_state(uint8_t out[256]) { pthread_mutex_lock(&lk); memcpy(out, keys, 256); pthread_mutex_unlock(&lk); }
+void input_mouse_buttons(uint8_t out[8]) { pthread_mutex_lock(&lk); memcpy(out, mbtn, 8); pthread_mutex_unlock(&lk); }
+void input_set_scancode_disabled(int sc, int disabled) {
+    if (sc < 0 || sc >= 264) return;
+    pthread_mutex_lock(&lk);
+    disabled_scancodes[sc] = disabled ? 1 : 0;
+    pthread_mutex_unlock(&lk);
+}
+int input_is_scancode_disabled(int sc) {
+    if (sc < 0 || sc >= 264) return 0;
+    pthread_mutex_lock(&lk);
+    int r = disabled_scancodes[sc] != 0;
+    pthread_mutex_unlock(&lk);
+    return r;
+}
+void input_script_tap_scancode(int sc) {
+    if (sc < 0 || sc >= 264) return;
+    pthread_mutex_lock(&lk);
+    script_tapped[sc] = 1;
+    pthread_mutex_unlock(&lk);
+}
+void input_script_hold_scancode(int sc) {
+    if (sc < 0 || sc >= 264) return;
+    pthread_mutex_lock(&lk);
+    script_held[sc] = 1;
+    pthread_mutex_unlock(&lk);
+}
+void input_script_release_scancode(int sc) {
+    if (sc < 0 || sc >= 264) return;
+    pthread_mutex_lock(&lk);
+    script_held[sc] = 0;
+    script_tapped[sc] = 0;
+    pthread_mutex_unlock(&lk);
+}
+int input_is_script_held(int sc) {
+    if (sc < 0 || sc >= 264) return 0;
+    pthread_mutex_lock(&lk);
+    int r = script_held[sc] != 0;
+    pthread_mutex_unlock(&lk);
+    return r;
+}
+void input_script_reset_overrides(void) {
+    pthread_mutex_lock(&lk);
+    memset(disabled_scancodes, 0, sizeof disabled_scancodes);
+    memset(script_held, 0, sizeof script_held);
+    memset(script_tapped, 0, sizeof script_tapped);
+    pthread_mutex_unlock(&lk);
+}
+void input_dinput_keyboard_state(uint8_t out[256]) {
+    pthread_mutex_lock(&lk);
+    for (int i = 0; i < 256; i++) {
+        int down = (keys[i] && !disabled_scancodes[i]) || script_held[i] || script_tapped[i];
+        out[i] = down ? 0x80 : 0;
+        script_tapped[i] = 0;
+    }
+    pthread_mutex_unlock(&lk);
+}
+void input_dinput_mouse_state(int32_t *dx, int32_t *dy, int32_t *dz, uint8_t b[8]) {
+    pthread_mutex_lock(&lk);
+    *dx = mdx; *dy = mdy; *dz = mdz;
+    mdx = mdy = mdz = 0;
+    for (int i = 0; i < 8; i++) {
+        int sc = 256 + i;
+        int down = (mbtn[i] && !disabled_scancodes[sc]) || script_held[sc] || script_tapped[sc];
+        b[i] = down ? 0x80 : 0;
+        script_tapped[sc] = 0;
+    }
+    pthread_mutex_unlock(&lk);
+}
 uint32_t input_map_vk(uint32_t code, uint32_t map_type) {
     if (map_type == 0) { // MAPVK_VK_TO_VSC
         for (int dik = 1; dik < 256; dik++) if (dikmap[dik].vk == code) return (uint32_t)dik;

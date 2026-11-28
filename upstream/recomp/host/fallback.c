@@ -18,7 +18,7 @@ typedef struct {
     uint32_t cur_ip;
     uint32_t prev_end;
     int has_pending;
-    int pending_is_import;
+    int pending_kind;
     uint32_t pending_target;
     uint32_t pending_ret;
 } FallbackRun;
@@ -75,12 +75,13 @@ static void on_block(uc_engine *uc, uint64_t address, uint32_t size, void *user)
     uint32_t came_from = r->prev_end;
     r->prev_end = a + size;
     int is_import = a >= IMPORT_THUNK_BASE && a < IMPORT_THUNK_BASE + 0x10000;
-    if (!is_import && (a == r->cur_ip || !rt_has_fn(a))) return;
+    int is_script = a >= SCRIPT_THUNK_BASE && a < SCRIPT_THUNK_END;
+    if (!is_import && !is_script && (a == r->cur_ip || !rt_has_fn(a))) return;
     uint32_t esp; uc_reg_read(uc, UC_X86_REG_ESP, &esp);
     uint32_t ret = G32(esp);
-    if (!is_import && ret != came_from) return;
+    if (!is_import && !is_script && ret != came_from) return;
     r->has_pending = 1;
-    r->pending_is_import = is_import;
+    r->pending_kind = is_import ? 1 : is_script ? 2 : 0;
     r->pending_target = a;
     r->pending_ret = ret;
     uc_emu_stop(uc);
@@ -143,7 +144,8 @@ void rt_fallback(CPU *c, uint32_t a) {
 
         if (run.has_pending) {
             depth++;
-            if (run.pending_is_import) rt_import_call(c, run.pending_target);
+            if (run.pending_kind == 1) rt_import_call(c, run.pending_target);
+            else if (run.pending_kind == 2) rt_script_call(c, run.pending_target);
             else rt_call(c, run.pending_target);
             depth--;
             if (run.pending_ret == root_ret) return;
