@@ -34,6 +34,101 @@ def run_quiet(cmd):
         raise subprocess.CalledProcessError(res.returncode, cmd, output=res.stdout)
 
 
+class _CompileProgress:
+    """TTY-aware progress bar matching quick-install.sh's styling."""
+
+    SPIN = ('⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏')
+    BAR_WIDTH = 24
+
+    def __init__(self, total, label='Compiling'):
+        self.total = total
+        self.label = label
+        self.fancy = sys.stdout.isatty() and os.environ.get('TERM', 'dumb') != 'dumb'
+        self.spin_idx = 0
+        self._active = False
+        if self.fancy:
+            term = os.environ.get('TERM', '')
+            use_256 = '256color' in term or os.environ.get('COLORTERM') in ('truecolor', '24bit')
+            if use_256:
+                self.gold = '\033[38;5;220m'
+                self.green = '\033[38;5;84m'
+                self.red = '\033[38;5;203m'
+                self.cyan = '\033[38;5;51m'
+            else:
+                self.gold = '\033[93m'
+                self.green = '\033[92m'
+                self.red = '\033[91m'
+                self.cyan = '\033[96m'
+            self.dim = '\033[2m'
+            self.reset = '\033[0m'
+        else:
+            self.gold = self.green = self.red = self.cyan = self.dim = self.reset = ''
+
+    def _bar(self, done, width):
+        pct = min(100, (done * 100) // self.total) if self.total > 0 else 100
+        filled = (pct * width) // 100
+        return ('█' * filled) + ('░' * (width - filled)), pct
+
+    def _draw(self, glyph, done, reused, compiled, end=''):
+        # Never exceed terminal width: wrapping past the right margin breaks \r in-place updates.
+        cols = shutil.get_terminal_size((80, 24)).columns
+        max_len = max(cols - 1, 20)
+        prefix_len = 2 + 1 + 1 + len(self.label) + 1  # "  <glyph> <label> "
+        pct_len = 5  # " 100%"
+
+        full_detail = f'{done}/{self.total} ({reused} cached, {compiled} built)'
+        short_detail = f'{done}/{self.total}'
+        bar_width = self.BAR_WIDTH
+
+        if prefix_len + bar_width + pct_len + 2 + len(full_detail) <= max_len:
+            detail = full_detail
+        elif prefix_len + bar_width + pct_len + 2 + len(short_detail) <= max_len:
+            detail = short_detail
+        else:
+            detail = short_detail
+            bar_width = max(4, max_len - prefix_len - pct_len - 2 - len(detail))
+
+        bar, pct = self._bar(done, bar_width)
+        line = (
+            f'\r  {glyph} {self.label} {self.gold}{bar}{self.reset} '
+            f'{pct:3d}%  {self.dim}{detail}{self.reset}\033[K{end}'
+        )
+        sys.stdout.write(line)
+        sys.stdout.flush()
+
+    def start(self):
+        if self.fancy:
+            self._active = True
+            sys.stdout.write('\033[?25l')
+            self._draw(f'{self.cyan}{self.SPIN[0]}{self.reset}', 0, 0, 0)
+
+    def tick(self, done, reused, compiled):
+        if self.fancy:
+            self.spin_idx = (self.spin_idx + 1) % len(self.SPIN)
+            self._draw(f'{self.cyan}{self.SPIN[self.spin_idx]}{self.reset}', done, reused, compiled)
+
+    def finish(self, done, reused, compiled):
+        if self.fancy:
+            self._draw(f'{self.green}✔{self.reset}', done, reused, compiled, end='\n')
+            sys.stdout.write('\033[?25h')
+            sys.stdout.flush()
+            self._active = False
+        else:
+            print(f'macOS objects: {reused} reused, {compiled} compiled', flush=True)
+
+    def fail(self):
+        if self.fancy and self._active:
+            sys.stdout.write(f'\r  {self.red}✘{self.reset} {self.label} failed\033[K\n\033[?25h')
+            sys.stdout.flush()
+            self._active = False
+
+    def restore_cursor(self):
+        if self.fancy and self._active:
+            sys.stdout.write('\033[?25h')
+            sys.stdout.flush()
+            self._active = False
+
+
 def patch_generated_tu(content):
     """Apply narrow correctness guards for vanilla TESV.exe bugs in translated C units."""
     # 1. Vanilla TESIdleForm::~TESIdleForm (0x55df80) iterates children[0..size-1] via
@@ -362,10 +457,10 @@ def main():
 
     unicorn = None if (probe or args.no_unicorn) else find_unicorn(args.unicorn_prefix)
     if unicorn:
-        print(f'Unicorn fallback enabled: {unicorn}', flush=True)
+        print(f'  Unicorn fallback enabled: {unicorn}', flush=True)
     ffmpeg = find_ffmpeg() if (args.game == 'skyrim' and not probe) else None
     if ffmpeg:
-        print(f'FFmpeg xWMA decoding enabled: {ffmpeg}', flush=True)
+        print(f'  FFmpeg xWMA decoding enabled: {ffmpeg}', flush=True)
 
     signature = hashlib.sha256(subprocess.check_output([cc, '--version']) + sdk.encode())
     for header in sorted({hdr for directory in [R, M] for hdr in directory.rglob('*.h')}):
@@ -446,18 +541,50 @@ def main():
             stored = args.cache / (key + '.o') if args.cache else None
             if stored and stored.exists() and digest(stored) == old_manifest.get(stored.name):
                 return str(stored), True
-            run(base + flags + ['-c', str(compiled_source), '-o', str(out)])
+            cmd = base + flags + ['-c', str(compiled_source), '-o', str(out)]
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            if res.returncode != 0:
+                raise subprocess.CalledProcessError(res.returncode, cmd, output=res.stdout)
             if stored:
                 os.replace(out, stored)
                 out = stored
             return str(out), False
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
-            compiled = list(pool.map(compile_one, enumerate(sources)))
-        objects = [path for path, _ in compiled]
+        progress = _CompileProgress(len(sources))
+        objects = [None] * len(sources)
+        reused_count = 0
+        built_count = 0
+        progress.start()
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
+                future_to_idx = {pool.submit(compile_one, item): item[0] for item in enumerate(sources)}
+                pending = set(future_to_idx)
+                while pending:
+                    done_set, pending = concurrent.futures.wait(
+                        pending, timeout=0.1, return_when=concurrent.futures.FIRST_COMPLETED
+                    )
+                    for fut in done_set:
+                        idx = future_to_idx[fut]
+                        try:
+                            obj_path, reused = fut.result()
+                        except BaseException as exc:
+                            for rem in pending:
+                                rem.cancel()
+                            progress.fail()
+                            if isinstance(exc, subprocess.CalledProcessError) and exc.output:
+                                sys.stderr.write(exc.output)
+                            raise
+                        objects[idx] = obj_path
+                        if reused:
+                            reused_count += 1
+                        else:
+                            built_count += 1
+                    progress.tick(reused_count + built_count, reused_count, built_count)
+            progress.finish(reused_count + built_count, reused_count, built_count)
+        finally:
+            progress.restore_cursor()
         if probes and set(probes) != matched_probes:
             raise ValueError('Requested diagnostic entries absent from generated source')
-        print(f'macOS objects: {sum(reused for _, reused in compiled)} reused, {sum(not reused for _, reused in compiled)} compiled', flush=True)
         if args.cache:
             (args.cache / 'manifest.json').write_text(json.dumps({Path(path).name: digest(Path(path)) for path in objects}, indent=2))
         if host_check:
